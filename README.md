@@ -105,3 +105,20 @@ For AI agents using MCP (Model Context Protocol):
 - BlockINTQL — sovereign blockchain query language
 
 Block6IQ — block6iq.com
+
+## Troubleshooting
+
+### "blockintql: command not found" on Mac
+
+Add Python's bin directory to your PATH:
+
+    echo 'export PATH="$PATH:/Users/$(whoami)/Library/Python/3.9/bin"' >> ~/.zshrc
+    source ~/.zshrc
+
+Or use python3 directly:
+
+    python3 -m blockintql --help
+
+### Use pip3 instead of pip on Mac
+
+    pip3 install blockintql
