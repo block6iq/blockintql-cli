@@ -108,68 +108,78 @@ def output(data, agent, quiet):
         click.echo(json.dumps(data, indent=2, default=str))
         return
     if "error" in data:
-        err_console.print(f"[red]Error:[/] {data['error']}")
+        err_console.print(f"  [red]✗[/red] {data['error']}")
         return
+
+    # ── VERDICT ────────────────────────────────────────────────────────────────
     if "verdict" in data and "risk_score" in data:
         v = data["verdict"]
         color = verdict_color(v)
-        console.print(Panel(f"[bold {color}]{v}[/]  {'✅' if data.get('safe') else '❌'}",
-                           title="BlockINTQL Verdict", border_style=color))
+        risk = int(data.get("risk_score", 0))
+        safe = data.get("safe", False)
+
+        VERDICT_ART = {
+            "CLEAR":   "█▀▀ █   █▀▀ ▄▀█ █▀█",
+            "CAUTION": "█▀▀ ▄▀█ █ █ ▀█▀ █ █ █▄",
+            "BLOCK":   "█▄▄ █▄▄ █▄█ █▄▀ █▄▀",
+        }
+
+        console.print()
+        console.print(f"  [bold {color}]{VERDICT_ART.get(v, v)}[/bold {color}]")
+        console.print(f"  [bold {color}]{v}[/bold {color}]  [dim]·[/dim]  [{color}]{risk}/100 risk[/{color}]  [dim]·[/dim]  [dim]{'SAFE' if safe else 'DO NOT TRANSACT'}[/dim]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+
         if not quiet:
-            t = Table(box=box.SIMPLE, show_header=False)
-            t.add_column("", style="dim", width=22)
-            t.add_column("")
-            t.add_row("Address", data.get("address",""))
-            t.add_row("Chain", data.get("chain",""))
-            t.add_row("Risk Score", f"{data.get('risk_score',0)}/100")
-            t.add_row("Entity", data.get("entity") or "Unknown")
+            console.print(f"  [dim]address [/dim] {data.get('address','')}")
+            console.print(f"  [dim]chain   [/dim] {data.get('chain','')}")
+            console.print(f"  [dim]entity  [/dim] {data.get('entity') or 'Unknown'}")
             if data.get("risk_indicators"):
-                t.add_row("Risk Indicators", ", ".join(data["risk_indicators"]))
+                console.print(f"  [dim]flags   [/dim] [{color}]{', '.join(data['risk_indicators'])}[/{color}]")
             if data.get("action"):
-                t.add_row("Action", data["action"])
+                console.print(f"  [dim]action  [/dim] {data['action']}")
             if data.get("provider_data"):
                 pd = data["provider_data"]
-                t.add_row("─"*15, "─"*25)
-                t.add_row(f"[dim]{pd.get('provider','').upper()} (local)[/]", "")
-                if pd.get("entity_name"): t.add_row("  Entity", pd["entity_name"])
-                t.add_row("  Risk", f"{pd.get('risk_score',0)}/100")
-                if pd.get("sanctions_hit"): t.add_row("  Sanctions", "[red]⚠️ HIT[/]")
-            console.print(t)
+                console.print(f"  [dim]{'─' * 52}[/dim]")
+                console.print(f"  [dim]{pd.get('provider','').upper()} · local · key never sent to BlockINTQL[/dim]")
+                if pd.get("entity_name"):
+                    console.print(f"  [dim]entity  [/dim] {pd['entity_name']}")
+                console.print(f"  [dim]risk    [/dim] {pd.get('risk_score',0)}/100")
+                if pd.get("sanctions_hit"):
+                    console.print(f"  [red]  ⚠  SANCTIONS HIT[/red]")
             if data.get("narrative"):
-                console.print(Panel(data["narrative"], title="Analysis", border_style="dim"))
+                console.print(f"  [dim]{'─' * 52}[/dim]")
+                console.print(f"  [dim]{data['narrative'][:300]}[/dim]")
+
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]BlockINTQL · block6iq.com[/dim]")
+        console.print()
         return
+
+    # ── PROFILE ────────────────────────────────────────────────────────────────
     if "profile" in data:
         found = data.get("found", False)
-        console.print(Panel(
-            f"[bold]{data['identifier']}[/] ({data.get('identifier_type','')})\n"
-            f"{'[green]Found[/]' if found else '[dim]Not found[/]'}",
-            title="BlockINTQL Profile", border_style="blue" if found else "dim"))
-        if not quiet and found:
+        console.print()
+        status = "[bold green]█ FOUND[/bold green]" if found else "[dim]█ NOT FOUND[/dim]"
+        console.print(f"  {status}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]identifier[/dim] {data['identifier']} ({data.get('identifier_type','')})")
+        if found:
             p = data.get("profile", {})
-            t = Table(box=box.SIMPLE, show_header=False)
-            t.add_column("", style="dim", width=25)
-            t.add_column("")
-            if p.get("entity_name"): t.add_row("Entity", p["entity_name"])
-            t.add_row("Risk Score", f"{p.get('risk_score',0)}/100")
-            if p.get("linked_bitcoin_addresses"):
-                t.add_row("Linked BTC", "\n".join(p["linked_bitcoin_addresses"][:5]))
-            if p.get("linked_identifiers"):
-                t.add_row("Linked IDs", "\n".join(
-                    [f"{l['identifier']} ({l['type']})" for l in p["linked_identifiers"][:5]]))
-            console.print(t)
+            if p.get("entity_name"):
+                console.print(f"  [dim]entity    [/dim] {p['entity_name']}")
+            console.print(f"  [dim]risk      [/dim] {p.get('risk_score',0)}/100")
+            for addr in p.get("linked_bitcoin_addresses", [])[:5]:
+                console.print(f"  [dim]btc       [/dim] {addr}")
+            for l in p.get("linked_identifiers", [])[:5]:
+                console.print(f"  [dim]linked    [/dim] {l['identifier']} ({l['type']})")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]BlockINTQL · OP_RETURN identity graph · block6iq.com[/dim]")
+        console.print()
         return
+
     if not quiet:
         console.print_json(json.dumps(data, default=str))
 
-provider_opts = [
-    click.option("--provider", "-p", default=None,
-                 type=click.Choice(["chainalysis","trm","elliptic","arkham","metamask","generic"]),
-                 help="Attribution provider (key stays on your machine)"),
-    click.option("--provider-key", default=None, envvar="BLOCKINTQL_PROVIDER_KEY",
-                 help="Provider API key — never sent to BlockINTQL"),
-    click.option("--provider-url", default=None,
-                 help="Custom provider URL template (use {address} placeholder)"),
-]
 
 def with_provider(f):
     for opt in reversed(provider_opts): f = opt(f)
