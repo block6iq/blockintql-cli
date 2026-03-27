@@ -1,0 +1,18 @@
+{
+  "name": "blockintql",
+  "version": "1.0.0",
+  "description": "BlockINTQL — Sovereign Blockchain Intelligence for AI Agents",
+  "main": "src/index.js",
+  "bin": {
+    "blockintql": "src/cli.js"
+  },
+  "scripts": {
+    "test": "node src/index.js"
+  },
+  "keywords": ["blockchain","bitcoin","ethereum","forensics","compliance","aml","agents","x402"],
+  "author": "Block6IQ <joe@block6iq.com>",
+  "license": "MIT",
+  "homepage": "https://blockintql.com",
+  "repository": {"type": "git", "url": "https://github.com/block6iq/blockintql-cli"},
+  "dependencies": {}
+}
