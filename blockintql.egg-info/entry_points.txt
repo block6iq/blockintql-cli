@@ -1,2 +1,0 @@
-[console_scripts]
-blockintql = blockintql.cli:main
