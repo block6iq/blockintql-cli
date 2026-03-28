@@ -129,19 +129,13 @@ def output(data, agent, quiet):
         risk = int(data.get("risk_score", 0))
         safe = data.get("safe", False)
 
-        VERDICT_ART = {
-            "CLEAR":   "█▀▀ █   █▀▀ ▄▀█ █▀█",
-            "CAUTION": "█▀▀ ▄▀█ █ █ ▀█▀ █ █ █▄",
-            "BLOCK":   "█▄▄ █▄▄ █▄█ █▄▀ █▄▀",
-        }
-
         console.print()
-        console.print(f"  [bold {color}]{VERDICT_ART.get(v, v)}[/bold {color}]")
         console.print(f"  [bold {color}]{v}[/bold {color}]  [dim]·[/dim]  [{color}]{risk}/100 risk[/{color}]  [dim]·[/dim]  [dim]{'SAFE' if safe else 'DO NOT TRANSACT'}[/dim]")
         console.print(f"  [dim]{'─' * 52}[/dim]")
 
         if not quiet:
-            console.print(f"  [dim]address [/dim] {data.get('address','')}")
+            addr = data.get('address') or data.get('subject','')
+            console.print(f"  [dim]address [/dim] {addr}")
             console.print(f"  [dim]chain   [/dim] {data.get('chain','')}")
             console.print(f"  [dim]entity  [/dim] {data.get('entity') or 'Unknown'}")
             if data.get("risk_indicators"):
