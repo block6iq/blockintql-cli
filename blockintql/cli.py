@@ -20,6 +20,17 @@ from rich.panel import Panel
 from rich import box
 from .providers import get_provider, list_providers
 
+# ── BANNER ────────────────────────────────────────────────────────────────────
+BLOCKINTQL_BANNER = """
+[bold white]██████╗ ██╗      ██████╗  ██████╗██╗  ██╗██╗███╗   ██╗████████╗ ██████╗ ██╗     [/bold white]
+[bold white]██╔══██╗██║     ██╔═══██╗██╔════╝██║ ██╔╝██║████╗  ██║╚══██╔══╝██╔═══██╗██║     [/bold white]
+[bold white]██████╔╝██║     ██║   ██║██║     █████╔╝ ██║██╔██╗ ██║   ██║   ██║   ██║██║     [/bold white]
+[bold white]██╔══██╗██║     ██║   ██║██║     ██╔═██╗ ██║██║╚██╗██║   ██║   ██║▄▄ ██║██║     [/bold white]
+[bold white]██████╔╝███████╗╚██████╔╝╚██████╗██║  ██╗██║██║ ╚████║   ██║   ╚██████╔╝███████╗[/bold white]
+[bold white]╚═════╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝   ╚═╝    ╚══▀▀═╝ ╚══════╝[/bold white]
+[dim]  Sovereign Blockchain Intelligence · by Block6IQ · block6iq.com[/dim]
+"""
+
 API_BASE = os.environ.get("BLOCKINTQL_API_URL", "https://btc-index-api-385334043904.us-central1.run.app")
 CONFIG_FILE = os.path.expanduser("~/.blockintql/config.json")
 console = Console()
@@ -185,15 +196,18 @@ def with_provider(f):
     for opt in reversed(provider_opts): f = opt(f)
     return f
 
-@click.group()
-@click.version_option("1.0.0", prog_name="blockintql")
-def cli():
+@click.group(invoke_without_command=True)
+@click.version_option("1.0.1", prog_name="blockintql")
+@click.pass_context
+def cli(ctx):
     """BlockINTQL — Sovereign Blockchain Intelligence CLI
 
     Your provider key never leaves your machine.
     BlockINTQL only receives the address being screened.
     """
-    pass
+    if ctx.invoked_subcommand is None:
+        console.print(BLOCKINTQL_BANNER)
+        click.echo(ctx.get_help())
 
 @cli.command()
 @click.option("--api-key", required=True)
