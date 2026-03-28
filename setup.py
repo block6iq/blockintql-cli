@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="blockintql",
-    version="1.0.2",
+    version="1.0.3",
     description="BlockINTQL — Sovereign Blockchain Intelligence CLI",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",

@@ -437,3 +437,21 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+@cli.command()
+@click.argument("name")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def ens(name, agent, quiet):
+    """Resolve an ENS name to an Ethereum address.
+
+    \b
+    Examples:
+      blockintql ens vitalik.eth
+      blockintql ens blockint.eth
+    """
+    if not quiet and not agent:
+        console.print(f"[dim]Resolving {name}...[/]")
+    result = api_get(f"/v1/eth/ens/{name}")
+    output(result, agent, quiet)
