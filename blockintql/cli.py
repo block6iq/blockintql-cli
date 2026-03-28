@@ -192,6 +192,16 @@ def output(data, agent, quiet):
         console.print_json(json.dumps(data, default=str))
 
 
+provider_opts = [
+    click.option("--provider", "-p", default=None,
+                 type=click.Choice(["chainalysis","trm","elliptic","arkham","generic"]),
+                 help="Attribution provider (key stays on your machine)"),
+    click.option("--provider-key", default=None, envvar="BLOCKINTQL_PROVIDER_KEY",
+                 help="Provider API key — never sent to BlockINTQL"),
+    click.option("--provider-url", default=None,
+                 help="Custom provider URL template with {address} placeholder"),
+]
+
 def with_provider(f):
     for opt in reversed(provider_opts): f = opt(f)
     return f
