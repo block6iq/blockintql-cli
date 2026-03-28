@@ -396,7 +396,7 @@ def skills(install, agent):
         ("trace","FIFO/LIFO tracing","blockintql trace --txid abc123..."),
         ("query","Natural language",'blockintql query "is this safe?"'),
         ("providers","List providers","blockintql providers"),
-        ("skills","Agent skills","blockintql skills --install >> CLAUDE.md"),
+        ("skills","Agent skills","blockintql skills --install >> CONTEXT.md"),
     ]
     for r in rows: t.add_row(*r)
     console.print(t)
@@ -435,6 +435,46 @@ def pay(wallet_type, cdp_key_id, cdp_private_key, private_key, auto_pay, max_pay
 def status(agent):
     """Check node health."""
     output(api_get("/health"), agent, False)
+
+
+@cli.command()
+@click.option("--email", "-e", required=True, help="Email to receive your API key")
+@click.option("--pack", default="starter", type=click.Choice(["starter","pro"]),
+              help="starter=$10/1000 screens · pro=$40/5000 screens")
+@click.option("--agent", is_flag=True)
+def buy(email, pack, agent):
+    """
+    Buy a credit pack and receive an API key by email.
+
+    \b
+    Examples:
+      blockintql buy --email you@example.com
+      blockintql buy --email you@example.com --pack pro
+    """
+    import webbrowser
+    console.print(f"[dim]Creating checkout for {email}...[/]")
+    result = api_post("/v1/billing/checkout", {"email": email, "pack": pack}, require_auth=False)
+    if "error" in result and not result.get("free_tier_exhausted"):
+        err_console.print(f"  [red]✗[/red] {result['error']}")
+        return
+    checkout_url = result.get("checkout_url")
+    if not checkout_url:
+        err_console.print("[red]Could not create checkout session[/]")
+        return
+    if agent or not sys.stdout.isatty():
+        click.echo(json.dumps({"checkout_url": checkout_url, "pack": pack, "email": email}, indent=2))
+        return
+    console.print(f"  [dim]Pack:[/dim]  {'$10 — 1,000 screens' if pack == 'starter' else '$40 — 5,000 screens'}")
+    console.print(f"  [dim]Email:[/dim] {email}")
+    console.print(f"  [dim]URL:[/dim]   {checkout_url}")
+    console.print()
+    try:
+        webbrowser.open(checkout_url)
+        console.print("[dim]Browser opened. Complete payment to receive your API key.[/]")
+    except:
+        console.print("[dim]Copy the URL above to complete payment.[/]")
+    console.print(f"[dim]After payment run:[/dim] blockintql auth --api-key biq_sk_live_...")
+
 
 def main():
     cli()
