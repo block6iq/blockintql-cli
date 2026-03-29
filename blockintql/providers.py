@@ -291,3 +291,63 @@ def get_provider(name: str, api_key: str = "", **kwargs):
 
 def list_providers() -> list:
     return [{"name": k, "description": v.description} for k, v in PROVIDERS.items()]
+
+
+# ── UNIVERSAL VERDICT LOGIC ────────────────────────────────────────────────────
+# Applied to any provider response after normalization.
+# BlockINTQL makes the decision — provider supplies the data.
+
+BLOCK_ENTITY_TYPES = {
+    "darknet", "darknet service", "darknet market", "mixer", "tumbler",
+    "sanctions", "sanctioned", "ransomware", "scam", "hack", "exploit",
+    "terrorist", "fraud", "illicit", "blacklist"
+}
+
+CAUTION_ENTITY_TYPES = {
+    "defi", "bridge", "cross-chain", "p2p", "gambling", "high risk exchange"
+}
+
+CLEAR_ENTITY_TYPES = {
+    "exchange", "mining pool", "miner", "payment processor",
+    "institution", "custodian", "defi protocol", "nft", "wallet"
+}
+
+BLOCK_RISK_INDICATORS = {
+    "SANCTIONS", "DARKNET_SERVICE", "DARKNET_MARKET", "MIXER",
+    "RANSOMWARE", "CHILD_ABUSE", "TERRORIST_FINANCING", "FRAUD"
+}
+
+def evaluate_provider_verdict(normalized: dict) -> str:
+    """
+    Takes a normalized provider response and returns CLEAR/CAUTION/BLOCK.
+    This is the universal decision layer — works across all providers.
+    """
+    # 1. Sanctions hit — always BLOCK
+    if normalized.get("sanctions_hit"):
+        return "BLOCK"
+
+    # 2. Check risk indicators
+    indicators = set(str(i).upper() for i in normalized.get("risk_indicators", []))
+    if indicators & BLOCK_RISK_INDICATORS:
+        return "BLOCK"
+
+    # 3. Check entity category
+    entity_cat = str(normalized.get("entity_category") or "").lower()
+    if any(b in entity_cat for b in BLOCK_ENTITY_TYPES):
+        return "BLOCK"
+    if any(c in entity_cat for c in CAUTION_ENTITY_TYPES):
+        return "CAUTION"
+
+    # 4. Check risk score
+    risk_score = float(normalized.get("risk_score") or 0)
+    if risk_score >= 70:
+        return "BLOCK"
+    if risk_score >= 30:
+        return "CAUTION"
+
+    # 5. Known safe entity
+    if any(s in entity_cat for s in CLEAR_ENTITY_TYPES):
+        return "CLEAR"
+
+    return "CLEAR"
+
