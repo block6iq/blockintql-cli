@@ -1,15 +1,24 @@
-from setuptools import setup, find_packages
+from pathlib import Path
+
+from setuptools import find_packages, setup
+
+
+ROOT = Path(__file__).parent
+README = (ROOT / "README.md").read_text(encoding="utf-8")
+VERSION = {}
+exec((ROOT / "blockintql" / "__init__.py").read_text(encoding="utf-8"), VERSION)
+
 
 setup(
     name="blockintql",
-    version="1.1.3"",
+    version=VERSION["__version__"],
     description="BlockINTQL — Sovereign Blockchain Intelligence CLI",
-    long_description=open("README.md").read(),
+    long_description=README,
     long_description_content_type="text/markdown",
     author="Block6IQ",
     author_email="joe@block6iq.com",
     url="https://blockintql.com",
-    packages=find_packages(),
+    packages=find_packages(include=["blockintql", "blockintql.*"]),
     install_requires=[
         "click>=8.0.0",
         "httpx>=0.27.0",
