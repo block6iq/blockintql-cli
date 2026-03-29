@@ -376,7 +376,7 @@ def providers(agent):
 @cli.command()
 @click.option("--install", is_flag=True)
 @click.option("--agent", is_flag=True)
-def skills(install, agent):
+def capabilities(install, agent):
     if install:
         r = httpx.get(f"{API_BASE}/skills/skill.md", timeout=10)
         click.echo(r.text)
