@@ -475,6 +475,48 @@ def buy(email, pack, agent):
     console.print("[dim]After payment run:[/dim] blockintql auth --api-key biq_sk_live_...")
 
 
+
+@cli.command()
+@click.option("--agent", is_flag=True)
+def init(agent):
+    """
+    Generate a free API key instantly — no email, no payment required.
+    10 free screens per day. Buy credits to remove the limit.
+
+    \b
+    Examples:
+      blockintql init
+      blockintql init --agent | jq -r '.api_key'
+    """
+    result = api_post("/v1/keys/generate", {}, require_auth=False)
+
+    if "error" in result:
+        err_console.print(f"  [red]✗[/red] {result['error']}")
+        return
+
+    key = result.get("api_key", "")
+
+    if agent or not sys.stdout.isatty():
+        click.echo(json.dumps(result, indent=2))
+        return
+
+    # Auto-save key
+    config = load_config()
+    config["api_key"] = key
+    save_config(config)
+
+    console.print()
+    console.print(f"  [bold green]API key generated and saved[/bold green]")
+    console.print(f"  [dim]{'─' * 50}[/dim]")
+    console.print(f"  [dim]key    [/dim] {key}")
+    console.print(f"  [dim]tier   [/dim] free — 10 screens/day")
+    console.print(f"  [dim]{'─' * 50}[/dim]")
+    console.print(f"  [dim]Need more?[/dim]")
+    console.print(f"  blockintql buy --email YOUR_EMAIL")
+    console.print(f"  blockintql pay --auto-pay [dim](agents — USDC on Base)[/dim]")
+    console.print()
+
+
 def main():
     cli()
 
