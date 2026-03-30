@@ -235,7 +235,7 @@ provider_opts = [
         "--provider",
         "-p",
         default=None,
-        type=click.Choice(["chainalysis", "trm", "elliptic", "arkham", "metamask", "generic"]),
+        type=click.Choice(["chainalysis", "trm", "elliptic", "arkham", "crystal", "merkle_science", "nomis", "metamask", "generic"]),
         help="Attribution provider (key stays on your machine)",
     ),
     click.option(
