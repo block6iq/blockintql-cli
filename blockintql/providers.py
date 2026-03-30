@@ -477,7 +477,6 @@ PROVIDERS = {
     "chainalysis": ChainalysisProvider,
     "trm": TRMProvider,
     "elliptic": EllipticProvider,
-    "arkham": ArkhamProvider,
     "crystal": CrystalProvider,
     "merkle_science": MerkleScienceProvider,
     "nomis": NomisProvider,
@@ -487,7 +486,6 @@ PROVIDERS = {
     "merkle_science": MerkleScienceProvider,
     "nomis": NomisProvider,
     "nomis": NomisProvider,
-    "metamask": MetaMaskRiskProvider,
     "generic": GenericProvider,
 }
 
