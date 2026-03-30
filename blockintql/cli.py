@@ -72,6 +72,42 @@ def api_get(path, params=None, require_auth=True):
         return {"error": str(e)}
 
 
+def fetch_credits():
+    """Fetch current credit balance."""
+    try:
+        key = get_api_key()
+        if not key:
+            return None
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        r = httpx.get(f"{API_BASE}/v1/me", headers=headers, timeout=5)
+        if r.status_code == 200:
+            return r.json().get("credits", 0)
+    except:
+        pass
+    return None
+
+CREDIT_COSTS = {
+    "verdict": 2, "screen": 2, "profile": 2, "trace": 2, "ens": 2,
+    "graphs": 5, "analyze": 10, "query": 10, "flows": 10,
+    "investigations": 20, "signals": 5,
+}
+
+def show_credit_cost(command_name):
+    """Show credit cost before a command runs."""
+    cost = CREDIT_COSTS.get(command_name, 1)
+    credits = fetch_credits()
+    if credits is not None:
+        console.print(f"  [dim]cost: {cost} credit{'s' if cost != 1 else ''} · balance: {credits:,} credits[/dim]")
+        if credits < cost:
+            console.print(f"  [dim]credits may be low — proceeding anyway[/dim]")
+    return True
+
+def show_credit_after(command_name):
+    """Show remaining balance after a command."""
+    credits = fetch_credits()
+    if credits is not None:
+        console.print(f"  [dim]remaining: {credits:,} credits[/dim]")
+
 def api_post(path, body, require_auth=True):
     try:
         headers = get_headers() if require_auth else {"Content-Type": "application/json"}
@@ -229,7 +265,44 @@ def cli(ctx):
     """BlockINTQL — Sovereign Blockchain Intelligence CLI"""
     if ctx.invoked_subcommand is None:
         console.print(BLOCKINTQL_BANNER)
-        click.echo(ctx.get_help())
+        v = __version__
+        credits = fetch_credits()
+        key = get_api_key()
+        # Status line
+        if key:
+            status = f"[green]●[/green] authenticated"
+            if credits is not None:
+                status += f" · [bold]{credits:,}[/bold] credits"
+            else:
+                status += " · [dim]credits: unknown[/dim]"
+        else:
+            status = "[red]●[/red] no API key — run: blockintql init"
+        console.print(f"  [dim]v{v}[/dim]  {status}")
+        console.print()
+        console.print("  [bold]SETUP[/bold]")
+        console.print("    init              Generate API key")
+        console.print("    auth              Save existing API key")
+        console.print("    buy               Purchase credits via Stripe")
+        console.print("    pay               Configure x402 USDC payments")
+        console.print("    status            Check key & credit balance")
+        console.print()
+        console.print("  [bold]INTELLIGENCE[/bold]  [dim](2 credits)[/dim]")
+        console.print("    verdict           Screen address — CLEAR / CAUTION / BLOCK")
+        console.print("    screen            Full risk screening with narrative")
+        console.print("    profile           Identity profile lookup")
+        console.print("    trace             Follow transaction hops")
+        console.print("    ens               ENS / identity resolution")
+        console.print()
+        console.print("  [bold]ANALYSIS[/bold]  [dim](5-20 credits)[/dim]")
+        console.print("    analyze           AI-powered address analysis")
+        console.print("    query             Natural language blockchain query")
+        console.print("    capabilities      List all CLI capabilities")
+        console.print()
+        console.print("  [bold]DATA[/bold]  [dim](1 credit)[/dim]")
+        console.print("    providers         List enrichment providers")
+        console.print()
+        console.print("  [dim]Docs: https://blockintql.com · GitHub: github.com/block6iq/blockintql-cli[/dim]")
+        console.print()
 
 
 @cli.command()
@@ -254,6 +327,9 @@ def auth(api_key, provider):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def verdict(address, chain, context, provider, provider_key, provider_url, agent, quiet):
+    if not agent and sys.stdout.isatty():
+        if not show_credit_cost("verdict"):
+            return
     config = load_config()
     provider = provider or config.get("default_provider")
     if not quiet and not agent:
@@ -275,6 +351,9 @@ def verdict(address, chain, context, provider, provider_key, provider_url, agent
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def screen(address, chain, provider, provider_key, provider_url, agent, quiet):
+    if not agent and sys.stdout.isatty():
+        if not show_credit_cost("screen"):
+            return
     config = load_config()
     provider = provider or config.get("default_provider")
     if not quiet and not agent:
@@ -452,7 +531,8 @@ def buy(email, pack, agent):
 
     if not agent:
         console.print(f"[dim]Creating checkout for {email}...[/]")
-    result = api_post("/v1/billing/checkout", {"email": email, "pack": pack}, require_auth=False)
+    existing_key = get_api_key() or ""
+    result = api_post("/v1/billing/checkout", {"email": email, "pack": pack, "api_key": existing_key}, require_auth=False)
     if "error" in result and not result.get("free_tier_exhausted"):
         err_console.print(f"  [red]✗[/red] {result['error']}")
         return
@@ -472,7 +552,7 @@ def buy(email, pack, agent):
         console.print("[dim]Browser opened. Complete payment to receive your API key.[/]")
     except Exception:
         console.print("[dim]Copy the URL above to complete payment.[/]")
-    console.print("[dim]After payment run:[/dim] blockintql auth --api-key biq_sk_live_...")
+    console.print("[dim]Credits will be added to your existing key automatically.[/]")
 
 
 
@@ -509,13 +589,116 @@ def init(agent):
     console.print(f"  [bold green]API key generated and saved[/bold green]")
     console.print(f"  [dim]{'─' * 50}[/dim]")
     console.print(f"  [dim]key    [/dim] {key}")
-    console.print(f"  [dim]tier   [/dim] free — 10 screens/day")
+    console.print(f"  [dim]tier   [/dim] pay-as-you-go")
+    console.print(f"  [dim]credits[/dim] 0 — buy credits to start")
     console.print(f"  [dim]{'─' * 50}[/dim]")
     console.print(f"  [dim]Need more?[/dim]")
     console.print(f"  blockintql buy --email YOUR_EMAIL")
     console.print(f"  blockintql pay --auto-pay [dim](agents — USDC on Base)[/dim]")
     console.print()
 
+
+
+@cli.command()
+@click.option("--address", "-a", default="")
+@click.option("--bulk", type=click.Path(exists=True), default=None)
+@click.option("--entity", "-e", required=True)
+@click.option("--category", "-c", default="OTHER")
+@click.option("--source-url", default="")
+@click.option("--evidence", default="")
+@click.option("--agent", is_flag=True)
+def report(address, bulk, entity, category, source_url, evidence, agent):
+    """Report address(es) for community review."""
+    addresses = []
+    if bulk:
+        with open(bulk) as f:
+            addresses = [l.strip() for l in f if l.strip()]
+    elif address:
+        addresses = [address]
+    else:
+        err_console.print("[red]Provide --address or --bulk[/red]"); return
+    body = {"addresses": addresses, "entity": entity,
+            "category": category.upper(), "source_url": source_url, "evidence": evidence}
+    result = api_post("/v1/labels/report", body)
+    if agent:
+        click.echo(json.dumps(result, indent=2)); return
+    if "error" in result:
+        err_console.print(f"  [red]{result['error']}[/red]"); return
+    cnt = result.get("count", 0)
+    console.print(f"  [green]Submitted {cnt} address(es)[/green]")
+    console.print(f"  [dim]entity:[/dim] {entity}")
+    console.print(f"  [dim]category:[/dim] {category}")
+    console.print(f"  [dim]Credits awarded upon approval[/dim]")
+
+
+@cli.command("list-categories")
+@click.option("--agent", is_flag=True)
+def list_categories(agent):
+    """List valid categories for reporting."""
+    result = api_get("/v1/labels/categories", require_auth=False)
+    if agent:
+        click.echo(json.dumps(result, indent=2)); return
+    for cat in result.get("categories", []):
+        console.print(f"  {cat}")
+
+
+@cli.command("label-add")
+@click.option("--address", "-a", required=True)
+@click.option("--entity", "-e", required=True)
+@click.option("--category", "-c", default="OTHER")
+@click.option("--risk", default="MEDIUM")
+@click.option("--sanctioned", is_flag=True)
+@click.option("--agent", is_flag=True)
+def label_add(address, entity, category, risk, sanctioned, agent):
+    """Admin: add or update an address label."""
+    body = {"address": address, "entity": entity,
+            "category": category.upper(), "risk_level": risk.upper(),
+            "is_sanctioned": sanctioned}
+    result = api_post("/v1/labels/add", body)
+    if agent:
+        click.echo(json.dumps(result, indent=2)); return
+    if "error" in result:
+        err_console.print(f"  [red]{result['error']}[/red]"); return
+    console.print(f"  [green]Label added[/green]: {entity} ({category})")
+
+
+@cli.command("label-search")
+@click.option("--entity", "-e", default="")
+@click.option("--category", "-c", default="")
+@click.option("--address", "-a", default="")
+@click.option("--agent", is_flag=True)
+def label_search(entity, category, address, agent):
+    """Search address labels."""
+    params = {}
+    if entity: params["entity"] = entity
+    if category: params["category"] = category
+    if address: params["address"] = address
+    if not params:
+        err_console.print("[red]Provide --entity, --category, or --address[/red]"); return
+    qs = "&".join(f"{k}={v}" for k,v in params.items())
+    result = api_get(f"/v1/labels/search?{qs}")
+    output(result, agent, False)
+
+
+@cli.command("leaderboard")
+@click.option("--agent", is_flag=True)
+def leaderboard(agent):
+    """View community attribution leaderboard."""
+    result = api_get("/v1/labels/leaderboard")
+    if agent:
+        click.echo(json.dumps(result, indent=2)); return
+    for r in result.get("leaderboard", []):
+        console.print(f"  #{r['rank']} {r.get('approved',0)} approved {r.get('credits_earned',0)} credits")
+
+
+@cli.command("set-name")
+@click.argument("name")
+def set_name(name):
+    """Set your display name for the leaderboard."""
+    result = api_post("/v1/me/name", {"display_name": name})
+    if "error" in result:
+        err_console.print(f"  [red]{result['error']}[/red]"); return
+    console.print(f"  [green]Display name set:[/green] {name}")
 
 def main():
     cli()
