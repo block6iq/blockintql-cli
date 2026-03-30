@@ -274,11 +274,219 @@ class GenericProvider(AttributionProvider):
             return self.normalize({"error": str(e)})
 
 
+
+
+class CrystalProvider(AttributionProvider):
+    name = "crystal"
+    description = "Crystal Blockchain — blockchain analytics by Bitfury"
+
+    def get_address_risk(self, address: str, chain: str = "bitcoin") -> dict:
+        currency = {"bitcoin": "btc", "ethereum": "eth"}.get(chain, "btc")
+        try:
+            r = httpx.get(
+                f"https://apiexpert.crystalblockchain.com/monitor/address/{address}",
+                headers={"X-Auth-Apikey": self.api_key, "Content-Type": "application/json"},
+                params={"currency": currency, "direction": "all"},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                return self.normalize({"error": f"HTTP {r.status_code}"})
+            data = r.json()
+            info = data.get("data", {})
+            risk_score = float(info.get("riskscore", 0))
+            if risk_score <= 1:
+                risk_score *= 100
+            signals = info.get("signals", {})
+            indicators = [k for k, v in signals.items() if v and v > 0]
+            result = self.normalize(data)
+            result.update({
+                "entity_name": info.get("name"),
+                "entity_category": info.get("type"),
+                "risk_score": risk_score,
+                "risk_indicators": indicators,
+                "sanctions_hit": "sanctions" in str(signals).lower(),
+            })
+            return result
+        except Exception as e:
+            return self.normalize({"error": str(e)})
+
+
+class MerkleScienceProvider(AttributionProvider):
+    name = "merkle_science"
+    description = "Merkle Science — predictive crypto risk and intelligence"
+
+    def get_address_risk(self, address: str, chain: str = "bitcoin") -> dict:
+        currency = {"bitcoin": "BTC", "ethereum": "ETH"}.get(chain, "BTC")
+        try:
+            r = httpx.post(
+                "https://api.merklescience.com/api/v3/addresses/",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                json={"identifier": address, "currency": currency},
+                timeout=15,
+            )
+            if r.status_code not in (200, 201):
+                return self.normalize({"error": f"HTTP {r.status_code}"})
+            data = r.json()
+            risk_score = float(data.get("risk_score", 0))
+            if risk_score <= 1:
+                risk_score *= 100
+            tags = data.get("tags", [])
+            result = self.normalize(data)
+            result.update({
+                "entity_name": data.get("entity_name"),
+                "entity_category": data.get("entity_type"),
+                "risk_score": risk_score,
+                "risk_indicators": [t.get("tag") for t in tags if t.get("tag")],
+                "sanctions_hit": any("sanction" in str(t).lower() for t in tags),
+            })
+            return result
+        except Exception as e:
+            return self.normalize({"error": str(e)})
+
+
+class NomisProvider(AttributionProvider):
+    name = "nomis"
+    description = "Nomis — on-chain reputation and wallet scoring"
+
+    def get_address_risk(self, address: str, chain: str = "ethereum") -> dict:
+        if chain != "ethereum":
+            return self.normalize({"error": "Nomis supports Ethereum only"})
+        try:
+            r = httpx.get(
+                f"https://api.nomis.cc/api/v1/wallet/{address}/score",
+                headers={"X-API-Key": self.api_key},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                return self.normalize({"error": f"HTTP {r.status_code}"})
+            data = r.json()
+            # Nomis returns a 0-1 reputation score; invert for risk
+            reputation = float(data.get("score", 0.5))
+            risk_score = round((1 - reputation) * 100)
+            result = self.normalize(data)
+            result.update({
+                "entity_name": data.get("identity"),
+                "risk_score": risk_score,
+                "risk_indicators": data.get("flags", []),
+            })
+            return result
+        except Exception as e:
+            return self.normalize({"error": str(e)})
+
+
+
+class CrystalProvider(AttributionProvider):
+    name = "crystal"
+    description = "Crystal Blockchain — blockchain analytics by Bitfury"
+
+    def get_address_risk(self, address: str, chain: str = "bitcoin") -> dict:
+        currency = {"bitcoin": "btc", "ethereum": "eth"}.get(chain, "btc")
+        try:
+            r = httpx.get(
+                f"https://apiexpert.crystalblockchain.com/monitor/address/{address}",
+                headers={"X-Auth-Apikey": self.api_key, "Content-Type": "application/json"},
+                params={"currency": currency, "direction": "all"},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                return self.normalize({"error": f"HTTP {r.status_code}"})
+            data = r.json()
+            info = data.get("data", {})
+            risk_score = float(info.get("riskscore", 0))
+            if risk_score <= 1:
+                risk_score *= 100
+            signals = info.get("signals", {})
+            indicators = [k for k, v in signals.items() if v and v > 0]
+            result = self.normalize(data)
+            result.update({
+                "entity_name": info.get("name"),
+                "entity_category": info.get("type"),
+                "risk_score": risk_score,
+                "risk_indicators": indicators,
+                "sanctions_hit": "sanctions" in str(signals).lower(),
+            })
+            return result
+        except Exception as e:
+            return self.normalize({"error": str(e)})
+
+
+
+class MerkleScienceProvider(AttributionProvider):
+    name = "merkle_science"
+    description = "Merkle Science — predictive crypto risk and intelligence"
+
+    def get_address_risk(self, address: str, chain: str = "bitcoin") -> dict:
+        currency = {"bitcoin": "BTC", "ethereum": "ETH"}.get(chain, "BTC")
+        try:
+            r = httpx.post(
+                "https://api.merklescience.com/api/v3/addresses/",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                json={"identifier": address, "currency": currency},
+                timeout=15,
+            )
+            if r.status_code not in (200, 201):
+                return self.normalize({"error": f"HTTP {r.status_code}"})
+            data = r.json()
+            risk_score = float(data.get("risk_score", 0))
+            if risk_score <= 1:
+                risk_score *= 100
+            tags = data.get("tags", [])
+            result = self.normalize(data)
+            result.update({
+                "entity_name": data.get("entity_name"),
+                "entity_category": data.get("entity_type"),
+                "risk_score": risk_score,
+                "risk_indicators": [t.get("tag") for t in tags if t.get("tag")],
+                "sanctions_hit": any("sanction" in str(t).lower() for t in tags),
+            })
+            return result
+        except Exception as e:
+            return self.normalize({"error": str(e)})
+
+
+
+class NomisProvider(AttributionProvider):
+    name = "nomis"
+    description = "Nomis — on-chain reputation and wallet scoring"
+
+    def get_address_risk(self, address: str, chain: str = "ethereum") -> dict:
+        if chain != "ethereum":
+            return self.normalize({"error": "Nomis supports Ethereum only"})
+        try:
+            r = httpx.get(
+                f"https://api.nomis.cc/api/v1/wallet/{address}/score",
+                headers={"X-API-Key": self.api_key},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                return self.normalize({"error": f"HTTP {r.status_code}"})
+            data = r.json()
+            reputation = float(data.get("score", 0.5))
+            risk_score = round((1 - reputation) * 100)
+            result = self.normalize(data)
+            result.update({
+                "entity_name": data.get("identity"),
+                "risk_score": risk_score,
+                "risk_indicators": data.get("flags", []),
+            })
+            return result
+        except Exception as e:
+            return self.normalize({"error": str(e)})
+
 PROVIDERS = {
     "chainalysis": ChainalysisProvider,
     "trm": TRMProvider,
     "elliptic": EllipticProvider,
     "arkham": ArkhamProvider,
+    "crystal": CrystalProvider,
+    "merkle_science": MerkleScienceProvider,
+    "nomis": NomisProvider,
+    "crystal": CrystalProvider,
+    "merkle_science": MerkleScienceProvider,
+    "nomis": NomisProvider,
+    "merkle_science": MerkleScienceProvider,
+    "nomis": NomisProvider,
+    "nomis": NomisProvider,
     "metamask": MetaMaskRiskProvider,
     "generic": GenericProvider,
 }
