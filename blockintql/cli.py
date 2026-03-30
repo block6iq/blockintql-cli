@@ -235,7 +235,7 @@ provider_opts = [
         "--provider",
         "-p",
         default=None,
-        type=click.Choice(["chainalysis", "trm", "elliptic", "arkham", "crystal", "merkle_science", "nomis", "metamask", "generic"]),
+        type=click.Choice(["chainalysis", "trm", "elliptic", "crystal", "merkle_science", "nomis", "generic"]),
         help="Attribution provider (key stays on your machine)",
     ),
     click.option(
@@ -458,10 +458,9 @@ def providers(agent):
         border_style="blue",
     )
     t.add_column("Provider", style="bold yellow")
-    t.add_column("Description")
     t.add_column("Key Required")
     for p in data:
-        t.add_row(p["name"], p["description"], "No" if p["name"] in ("metamask", "generic") else "Yes")
+        t.add_row(p["name"], "No" if p["name"] in ("generic",) else "Yes")
     console.print(t)
 
 
