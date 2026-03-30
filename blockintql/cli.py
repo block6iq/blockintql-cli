@@ -3,9 +3,18 @@
 BlockINTQL CLI
 
 PRIVACY ARCHITECTURE:
-  BlockINTQL API receives: address + chain ONLY
-  Provider API receives: address + your key (direct from your machine)
-  BlockINTQL NEVER sees: your provider key or raw provider response
+  Provider keys are NEVER sent to BlockINTQL — they stay on your machine.
+  Provider API calls run locally from your CLI, not proxied through our servers.
+
+  What the BlockINTQL API DOES receive per command:
+    verdict  — address, chain, context (if supplied)
+    screen   — address, chain
+    analyze  — query text, addresses, chain, output format
+    profile  — identifier (email/handle/phone/etc.), type
+    trace    — txid, hops, method
+    query    — natural-language question
+    buy      — email
+    ens      — ENS name
 
 Verify this by reading the source. Open source: github.com/block6iq/blockintql-cli
 """
@@ -319,17 +328,32 @@ def cli(ctx):
 
 
 @cli.command()
-@click.option("--api-key", required=True)
+@click.option("--api-key", default=None, envvar="BLOCKINTQL_API_KEY",
+              help="API key (prefer env var BLOCKINTQL_API_KEY to avoid shell history)")
 @click.option("--provider", default=None)
 def auth(api_key, provider):
-    """Save API key and optional default provider name."""
+    """Save API key and optional default provider name.
+
+    \b
+    Recommended (avoids shell history leak):
+      export BLOCKINTQL_API_KEY=biq_sk_live_...
+      blockintql auth
+
+    \b
+    Or paste interactively:
+      blockintql auth --api-key -
+    """
+    if api_key == "-":
+        api_key = click.prompt("API key", hide_input=True)
+    if not api_key:
+        api_key = click.prompt("API key (or set BLOCKINTQL_API_KEY env var)", hide_input=True)
     config = load_config()
     config["api_key"] = api_key
     if provider:
         config["default_provider"] = provider
     save_config(config)
     console.print("[green]Saved API configuration.[/]")
-    console.print("[dim]Keep provider keys in environment variables instead of config files.[/]")
+    console.print("[dim]Tip: set BLOCKINTQL_API_KEY as an env var to avoid keys in shell history.[/]")
 
 
 @cli.command()
@@ -479,7 +503,7 @@ def capabilities(install, agent):
                 {
                     "commands": ["verdict", "screen", "analyze", "profile", "trace", "query", "providers"],
                     "providers": [p["name"] for p in list_providers()],
-                    "privacy": "Provider keys never leave your machine",
+                    "privacy": "Provider keys never leave your machine. See module docstring for full data-sent-per-command breakdown.",
                     "mcp_server": "https://blockintql-mcp-385334043904.us-central1.run.app/mcp",
                     "source": "https://github.com/block6iq/blockintql-cli",
                 },
@@ -504,7 +528,7 @@ def capabilities(install, agent):
     for r in rows:
         t.add_row(*r)
     console.print(t)
-    console.print("\n[dim]Provider keys stay on your machine. BlockINTQL only sees the address.[/]")
+    console.print("\n[dim]Provider keys stay on your machine. See --help or source for what each command sends.[/]")
     console.print("[dim]Source: github.com/block6iq/blockintql-cli[/]")
 
 

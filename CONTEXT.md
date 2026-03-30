@@ -5,7 +5,7 @@ Blockchain intelligence CLI and API. Screen addresses, trace funds, analyze wall
 ## Installation
 ```bash
 pip3 install blockintql
-blockintql auth --api-key biq_sk_live_...
+export BLOCKINTQL_API_KEY=biq_sk_live_...  # or: blockintql auth (interactive prompt)
 ```
 
 ---
