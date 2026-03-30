@@ -258,7 +258,12 @@ def with_provider(f):
     return f
 
 
-@click.group(invoke_without_command=True)
+class CustomGroup(click.Group):
+    def format_help(self, ctx, formatter):
+        # Delegate to our custom branded help
+        cli.invoke(ctx)
+
+@click.group(cls=CustomGroup, invoke_without_command=True)
 @click.version_option(__version__, prog_name="blockintql")
 @click.pass_context
 def cli(ctx):
@@ -300,6 +305,14 @@ def cli(ctx):
         console.print()
         console.print("  [bold]DATA[/bold]  [dim](1 credit)[/dim]")
         console.print("    providers         List enrichment providers")
+        console.print()
+        console.print("  [bold]COMMUNITY[/bold]  [dim](free)[/dim]")
+        console.print("    report            Report address(es) for review")
+        console.print("    list-categories   Valid reporting categories")
+        console.print("    label-add         Admin: add address label")
+        console.print("    label-search      Search address labels")
+        console.print("    leaderboard       Attribution leaderboard")
+        console.print("    set-name          Set your display name")
         console.print()
         console.print("  [dim]Docs: https://blockintql.com · GitHub: github.com/block6iq/blockintql-cli[/dim]")
         console.print()
