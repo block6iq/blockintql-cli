@@ -57,7 +57,7 @@ def get_api_key():
 def get_headers():
     key = get_api_key()
     if not key:
-        err_console.print("[red]No API key.[/] Run: blockintql auth --api-key YOUR_KEY")
+        err_console.print("[red]No API key.[/] Run: blockintql auth  or set BLOCKINTQL_API_KEY env var")
         sys.exit(1)
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
