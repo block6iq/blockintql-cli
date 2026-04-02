@@ -89,7 +89,7 @@ def fetch_credits():
 CREDIT_COSTS = {
     "verdict": 2, "screen": 2, "profile": 2, "trace": 2, "ens": 2,
     "graphs": 5, "analyze": 10, "query": 10, "flows": 10,
-    "investigations": 20, "signals": 5,
+    "investigations": 20, "signals": 5, "exposure": 5, "opreturn-search": 5, "opreturn-stats": 2,
 }
 
 def show_credit_cost(command_name):
@@ -531,7 +531,7 @@ def pay(wallet_type, cdp_key_id, cdp_private_key, private_key, auto_pay, max_pay
 @cli.command()
 @click.option("--agent", is_flag=True)
 def status(agent):
-    output(api_get("/health"), agent, False)
+    output(api_get("/v1/me"), agent, False)
 
 
 @cli.command()
