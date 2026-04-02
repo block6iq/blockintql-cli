@@ -230,6 +230,59 @@ def output(data, agent, quiet):
         console.print_json(json.dumps(data, default=str))
 
 
+
+def display_analytics_table(result):
+    """Display analytics results as a Rich table."""
+    columns = result.get("columns", [])
+    rows = result.get("rows", [])
+    
+    if not rows:
+        console.print("[yellow]No results found[/yellow]")
+        return
+    
+    # Create table
+    table = Table(box=box.ROUNDED, border_style="blue")
+    
+    # Add columns
+    for col in columns:
+        table.add_column(col.replace("_", " ").title(), style="cyan")
+    
+    # Add rows (limit to 50 for display)
+    for row in rows[:50]:
+        table.add_row(*[str(row.get(col, "")) for col in columns])
+    
+    console.print()
+    console.print(table)
+    console.print()
+    console.print(f"[dim]Showing {min(len(rows), 50)} of {len(rows)} results[/dim]")
+
+def display_analytics_chart(result):
+    """Display analytics results as ASCII bar chart."""
+    rows = result.get("rows", [])
+    columns = result.get("columns", [])
+    
+    if not rows or len(columns) < 2:
+        console.print("[yellow]Not enough data for chart[/yellow]")
+        return
+    
+    # Assume first column is label, second is value
+    label_col = columns[0]
+    value_col = columns[1]
+    
+    console.print(f"\n[bold]{value_col.replace('_', ' ').title()}[/bold]\n")
+    
+    # Get max value for scaling
+    max_val = max(float(row.get(value_col, 0)) for row in rows[:20])
+    
+    # Display bars
+    for row in rows[:20]:
+        label = str(row.get(label_col, ""))[:20]
+        value = float(row.get(value_col, 0))
+        bar_length = int((value / max_val) * 50) if max_val > 0 else 0
+        bar = "█" * bar_length
+        console.print(f"{label:20} {bar} {value:,.0f}")
+    
+    console.print()
 provider_opts = [
     click.option(
         "--provider",
@@ -441,6 +494,45 @@ def query(query, agent, quiet):
     output(result, agent, quiet)
 
 
+
+@cli.command()
+@click.argument("query_text")
+@click.option("--format", "fmt", default="table", type=click.Choice(["table", "json", "chart"]))
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def analytics(query_text, fmt, agent, quiet):
+    """Run analytics queries with instant results from materialized views.
+    
+    Examples:
+      blockintql analytics "daily active users"
+      blockintql analytics "top 50 USDT holders"
+      blockintql analytics "token launches last week"
+    """
+    if not agent and sys.stdout.isatty():
+        if not show_credit_cost("analytics"):
+            return
+    
+    if not quiet and not agent:
+        console.print("[dim]Running analytics query...[/]")
+    
+    result = api_post("/v1/analytics", {"query": query_text})
+    
+    if agent or fmt == "json":
+        click.echo(json.dumps(result, indent=2))
+        return
+    
+    if "error" in result:
+        err_console.print(f"  [red]✗[/red] {result['error']}")
+        return
+    
+    # Format as table or chart
+    if fmt == "table":
+        display_analytics_table(result)
+    elif fmt == "chart":
+        display_analytics_chart(result)
+    
+    if not agent and sys.stdout.isatty():
+        show_credit_after("analytics")
 @cli.command()
 @click.option("--agent", is_flag=True)
 def providers(agent):
@@ -725,3 +817,54 @@ def ens(name, agent, quiet):
         console.print(f"[dim]Resolving {name}...[/]")
     result = api_get(f"/v1/eth/ens/{name}")
     output(result, agent, quiet)
+
+@click.command()
+@click.argument('query')
+@click.option('--limit', default=20, help='Number of results')
+@pass_config
+def opreturn_search(config, query, limit):
+    """Search Bitcoin OP_RETURN messages (197.8M indexed)"""
+    url = f"{config.api_url}/v1/opreturn/search"
+    headers = {"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"}
+    
+    try:
+        response = requests.post(url, headers=headers, json={"query": query, "limit": limit})
+        response.raise_for_status()
+        data = response.json()
+        
+        click.echo(f"\n  Found {data.get('results', 0)} messages matching '{query}':\n")
+        
+        for msg in data.get('data', []):
+            click.echo(f"  Block {msg['block_height']} | {msg['block_time']}")
+            click.echo(f"  TX: {msg['tx_hash']}")
+            click.echo(f"  Message: {msg['decoded_text'][:100]}")
+            click.echo(f"  Protocol: {msg.get('protocol', 'unknown')}\n")
+            
+    except requests.exceptions.RequestException as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@click.command()
+@click.argument('query')
+@click.option('--limit', default=20, help='Number of results')
+@pass_config
+def opreturn_search(config, query, limit):
+    """Search Bitcoin OP_RETURN messages (197M+ indexed)"""
+    url = f"{config.api_url}/v1/opreturn/search"
+    headers = {"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"}
+    
+    try:
+        response = requests.post(url, headers=headers, json={"query": query, "limit": limit})
+        response.raise_for_status()
+        data = response.json()
+        
+        click.echo(f"\n  Found {data.get('results', 0)} messages:\n")
+        for msg in data.get('data', []):
+            click.echo(f"  Block {msg['block_height']} | {msg['block_time']}")
+            click.echo(f"  {msg['decoded_text'][:80]}\n")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+cli.add_command(opreturn_search)
