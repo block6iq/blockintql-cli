@@ -333,7 +333,7 @@ def auth(api_key, provider):
 
 
 @cli.command()
-@click.option("--address", "-a", required=True)
+@click.argument("address")
 @click.option("--chain", "-c", default="bitcoin", type=click.Choice(["bitcoin", "ethereum"]))
 @click.option("--context", default="")
 @with_provider
@@ -358,7 +358,7 @@ def verdict(address, chain, context, provider, provider_key, provider_url, agent
 
 
 @cli.command()
-@click.option("--address", "-a", required=True)
+@click.argument("address")
 @click.option("--chain", "-c", default="bitcoin", type=click.Choice(["bitcoin", "ethereum"]))
 @with_provider
 @click.option("--agent", is_flag=True)
@@ -401,11 +401,7 @@ def analyze(query, address, chain, fmt, agent, quiet):
 
 
 @cli.command()
-@click.option(
-    "--identifier",
-    "-i",
-    required=True,
-)
+@click.argument("identifier")
 @click.option(
     "--type",
     "id_type",
