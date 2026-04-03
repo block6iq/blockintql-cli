@@ -1,6 +1,6 @@
 """Interactive graph visualization for blockchain data"""
 
-from .templates import GraphTemplate
 from .builder import GraphBuilder
+from .templates import GraphTemplate
 
-__all__ = ['GraphTemplate', 'GraphBuilder']
+__all__ = ['GraphBuilder', 'GraphTemplate']
