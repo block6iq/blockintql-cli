@@ -1407,3 +1407,111 @@ def graph(config, type, data, output, color_scheme):
     
     click.echo(f"  ✓ Graph saved to {output}")
     click.echo(f"\n💡 Open in browser: file://{os.path.abspath(output)}")
+
+@cli.command()
+@click.argument('address')
+@click.option('--depth', '-d', default=2, help='Investigation depth (hops)')
+@click.option('--output', '-o', default=None, help='Output file')
+@pass_config
+def investigate(config, address, depth, output):
+    """🤖 Autonomous investigation with visual graph (agent-native)"""
+    from blockintql.graph.agent import AgentGraph
+    
+    click.echo(f"🔍 Investigating {address}...")
+    click.echo(f"   Depth: {depth} hops")
+    
+    if not config.api_key:
+        click.echo("❌ No API key found. Run: blockintql auth")
+        return
+    
+    # Agent does everything autonomously
+    html = AgentGraph.investigate_address(address, config.api_key, depth)
+    
+    # Save report
+    filepath = AgentGraph.save_report(html, output)
+    
+    click.echo(f"\n✅ Investigation complete!")
+    click.echo(f"📊 Report: file://{filepath}")
+    click.echo(f"\n💡 This same function works for AI agents:")
+    click.echo(f"   from blockintql.graph.agent import AgentGraph")
+    click.echo(f"   html = AgentGraph.investigate_address('{address}', api_key, depth={depth})")
+
+@cli.command()
+@click.argument("address", nargs=-1, required=True)
+@click.option("--chain", "-c", default="bitcoin", type=click.Choice(["bitcoin", "ethereum"]))
+@click.option("--depth", "-d", default=2, type=int, help="Max hops (1-5)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.option("--agent", is_flag=True)
+@click.option("--output", "-o", default=None, help="Save results to file")
+def expand(address, chain, depth, yes, agent, output):
+    """Expand seed addresses to find related wallets. Routes large queries to warehouse automatically."""
+    import time, httpx as _hx
+    addresses = list(address)
+    if not agent:
+        console.print(f"[dim]Estimating query size...[/dim]")
+    est = api_post("/v1/entity/expand/estimate", {"addresses": addresses, "chain": chain, "max_hops": depth})
+    if "error" in est:
+        console.print(f"[red]Estimate failed:[/red] {est['error']}")
+        return
+    tier = est.get("tier", "instant")
+    estimated = est.get("estimated_results", 0)
+    cost = est.get("cost_credits", 5)
+    cost_usd = est.get("cost_usd", 0.05)
+    eta = est.get("estimated_time", "2-5 seconds")
+    if not agent:
+        console.print(f"  [dim]estimated results:[/dim] [bold]{estimated:,}[/bold]")
+        console.print(f"  [dim]tier:            [/dim] [bold]{tier}[/bold]")
+        console.print(f"  [dim]cost:            [/dim] [bold]{cost} credits (${cost_usd:.2f})[/bold]")
+        console.print(f"  [dim]time:            [/dim] [bold]{eta}[/bold]")
+    if not yes and not agent:
+        click.confirm("  Proceed?", abort=True)
+    if tier == "instant":
+        console.print(f"[dim]Running...[/dim]")
+        result = api_post("/v1/entity/expand", {"addresses": addresses, "chain": chain, "max_hops": depth})
+        if output:
+            with open(output, "w") as f: json.dump(result, f, indent=2)
+            console.print(f"  [dim]saved to:[/dim] {output}")
+        else:
+            click.echo(json.dumps(result, indent=2))
+        return
+    console.print(f"[dim]Submitting warehouse job...[/dim]")
+    job = api_post("/v1/warehouse/submit", {"type": "entity_expand", "params": {"addresses": addresses, "chain": chain, "max_hops": depth}, "estimated_time": eta, "cost_credits": cost})
+    if "error" in job:
+        console.print(f"[red]Submit failed:[/red] {job['error']}")
+        return
+    query_id = job.get("query_id")
+    console.print(f"  [dim]job:[/dim] {query_id}")
+    console.print(f"  [dim]polling every 5s (Ctrl+C stops watching, job continues)[/dim]\n")
+    start = time.time()
+    spin = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+    i = 0
+    cfg = load_config()
+    headers = {"Authorization": f"Bearer {cfg.get('api_key', '')}"}
+    while True:
+        try:
+            r = _hx.get(f"{API_BASE}/v1/warehouse/status/{query_id}", headers=headers, timeout=10)
+            s = r.json()
+        except Exception:
+            s = {}
+        status = s.get("status", "queued")
+        elapsed = int(time.time() - start)
+        m, sec = divmod(elapsed, 60)
+        if status == "complete":
+            console.print(f"\r  [green]✓ Complete![/green] {m}m{sec:02d}s")
+            results_url = s.get("results_url", "")
+            console.print(f"  [dim]results:[/dim] {results_url}")
+            if output and results_url:
+                try:
+                    r2 = _hx.get(results_url, timeout=60)
+                    with open(output, "w") as f: f.write(r2.text)
+                    console.print(f"  [dim]saved to:[/dim] {output}")
+                except Exception as e:
+                    console.print(f"  [yellow]Download failed: {e}[/yellow]")
+            break
+        elif status == "failed":
+            console.print(f"\r  [red]✗ Failed:[/red] {s.get('error', 'Unknown')}")
+            break
+        else:
+            print(f"\r  {spin[i % len(spin)]} {status} · {m}m{sec:02d}s", end="", flush=True)
+            i += 1
+            time.sleep(5)
