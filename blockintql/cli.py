@@ -349,12 +349,11 @@ def cli(ctx):
         console.print("    screen            Full risk screening with narrative")
         console.print("    profile           Identity profile lookup")
         console.print("    trace             Follow transaction hops")
-        console.print("    ens               ENS / identity resolution")
         console.print()
         console.print("  [bold]ANALYSIS[/bold]  [dim](5-20 credits)[/dim]")
         console.print("    analyze           AI-powered address analysis")
         console.print("    query             Natural language blockchain query")
-        console.print("    capabilities      List all CLI capabilities")
+        console.print("    capabilities      List supported CLI capabilities")
         console.print()
         console.print("  [bold]DATA[/bold]  [dim](1 credit)[/dim]")
         console.print("    providers         List enrichment providers")
@@ -362,12 +361,11 @@ def cli(ctx):
         console.print("  [bold]COMMUNITY[/bold]  [dim](free)[/dim]")
         console.print("    report            Report address(es) for review")
         console.print("    list-categories   Valid reporting categories")
-        console.print("    label-add         Admin: add address label")
         console.print("    label-search      Search address labels")
         console.print("    leaderboard       Attribution leaderboard")
         console.print("    set-name          Set your display name")
         console.print()
-        console.print("  [dim]Docs: https://blockintql.com · GitHub: github.com/block6iq/blockintql-cli[/dim]")
+        console.print("  [dim]Docs: https://blockintql.com/docs/blockintql · GitHub: github.com/block6iq/blockintql-cli[/dim]")
         console.print()
 
 
@@ -495,7 +493,7 @@ def query(query, agent, quiet):
 
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.argument("query_text")
 @click.option("--format", "fmt", default="table", type=click.Choice(["table", "json", "chart"]))
 @click.option("--agent", is_flag=True)
@@ -555,586 +553,85 @@ def providers(agent):
 @cli.command()
 @click.option("--install", is_flag=True)
 @click.option("--agent", is_flag=True)
-@click.option("--category", type=str, help="Filter by category")
+@click.option("--category", type=click.Choice(["setup", "intelligence", "analysis", "data", "community"]), help="Filter by category")
 def capabilities(install, agent, category):
-    """List all CLI capabilities and API endpoints"""
-    
+    """List supported CLI capabilities."""
+
     if install:
         r = httpx.get(f"{API_BASE}/skills/skill.md", timeout=10)
         click.echo(r.text)
         return
-    
-    endpoints = {
-        "screening": [
-                {
-                        "cmd": "verdict",
-                        "endpoint": "/v1/verdict",
-                        "desc": "Address risk verdict (CLEAR/CAUTION/BLOCK)",
-                        "credits": 2
-                },
-                {
-                        "cmd": "verdict",
-                        "endpoint": "/v1/verdict/bulk",
-                        "desc": "Batch screening (up to 100 addresses)",
-                        "credits": "2/addr"
-                },
-                {
-                        "cmd": "screen",
-                        "endpoint": "/v1/screen",
-                        "desc": "Full counterparty screening with risk flags",
-                        "credits": 2
-                }
+
+    commands = {
+        "setup": [
+            {"cmd": "init", "desc": "Generate API key", "credits": "Free"},
+            {"cmd": "auth", "desc": "Save existing API key", "credits": "Free"},
+            {"cmd": "buy", "desc": "Purchase credits via Stripe", "credits": "Free"},
+            {"cmd": "pay", "desc": "Configure local x402 payment preferences", "credits": "Free"},
+            {"cmd": "status", "desc": "Check account info and credits", "credits": "1"},
         ],
         "intelligence": [
-                {
-                        "cmd": "analyze",
-                        "endpoint": "/v1/analyze",
-                        "desc": "5-agent AI forensic analysis",
-                        "credits": 10
-                },
-                {
-                        "cmd": "trace",
-                        "endpoint": "/v1/trace",
-                        "desc": "Fund tracing with FIFO/LIFO",
-                        "credits": 2
-                },
-                {
-                        "cmd": "query",
-                        "endpoint": "/v1/intelligence/search",
-                        "desc": "Natural language blockchain query",
-                        "credits": 10
-                },
-                {
-                        "cmd": "profile",
-                        "endpoint": "/v1/profile/search",
-                        "desc": "OP_RETURN identity search",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/exposure",
-                        "desc": "N-hop exposure to labeled entities",
-                        "credits": 5
-                }
+            {"cmd": "verdict", "desc": "Address risk verdict (CLEAR/CAUTION/BLOCK)", "credits": "2"},
+            {"cmd": "screen", "desc": "Full counterparty screening with flags", "credits": "2"},
+            {"cmd": "profile", "desc": "OP_RETURN identity search", "credits": "1"},
+            {"cmd": "trace", "desc": "Fund tracing with FIFO/LIFO", "credits": "2"},
         ],
-        "entity": [
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/entity/expand",
-                        "desc": "Expand seed addresses to find related wallets",
-                        "credits": 5
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/entity/sweep-analysis",
-                        "desc": "Detect deposit-to-hot-wallet consolidation",
-                        "credits": 5
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/entity/identify-exchange",
-                        "desc": "Identify exchange patterns",
-                        "credits": 5
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/entity/cluster",
-                        "desc": "Generic clustering (exchange/mixer/OTC)",
-                        "credits": 5
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/entity/cluster/score",
-                        "desc": "Score cluster confidence",
-                        "credits": 3
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/address/role-classify",
-                        "desc": "Classify address role",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/entity/explain",
-                        "desc": "Explain clustering evidence",
-                        "credits": 2
-                }
+        "analysis": [
+            {"cmd": "analyze", "desc": "5-agent AI forensic analysis", "credits": "10"},
+            {"cmd": "query", "desc": "Natural language blockchain query", "credits": "10"},
+            {"cmd": "capabilities", "desc": "List supported CLI capabilities", "credits": "Free"},
         ],
-        "bitcoin": [
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/blocks/latest",
-                        "desc": "Latest blocks",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/blocks/history",
-                        "desc": "Historical block data",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/fees/current",
-                        "desc": "Current fee estimates",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/index/fee-pressure",
-                        "desc": "Fee pressure index",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/mempool/large-txs",
-                        "desc": "Large pending transactions",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/tx/{txid}",
-                        "desc": "Transaction lookup",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/tx/{txid}/classify",
-                        "desc": "Transaction classification",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/address/{address}/history",
-                        "desc": "Address transaction history",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/address/{address}/first-seen",
-                        "desc": "Address first seen",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/address/{address}/utxos",
-                        "desc": "Address UTXOs",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/cluster/{address}",
-                        "desc": "Address clustering",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/patterns/peeling-chain/{txid}",
-                        "desc": "Peeling chain detection",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/patterns/batch-withdrawal/{txid}",
-                        "desc": "Batch withdrawal detection",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/patterns/coinjoin/{txid}",
-                        "desc": "CoinJoin detection",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/patterns/consolidation/{txid}",
-                        "desc": "Consolidation detection",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/network/segwit-adoption",
-                        "desc": "SegWit adoption stats",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/btc/price/at/{txid}",
-                        "desc": "BTC price at tx time",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/btc/address/{address}/cost-basis",
-                        "desc": "Cost basis calculation",
-                        "credits": 1
-                }
+        "data": [
+            {"cmd": "providers", "desc": "List local enrichment providers", "credits": "Free"},
         ],
-        "ethereum_free": [
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/status",
-                        "desc": "Node sync status",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/block/latest",
-                        "desc": "Latest block",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/block/{block_number}",
-                        "desc": "Block by number",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/gas",
-                        "desc": "Gas prices",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/balance",
-                        "desc": "ETH balance",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/transactions",
-                        "desc": "Transactions (max 50)",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/token-transfers",
-                        "desc": "Token transfers (max 50)",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/tokens",
-                        "desc": "Token balances",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/history",
-                        "desc": "Combined tx + transfer history",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/stablecoins",
-                        "desc": "Stablecoin holdings",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/ens",
-                        "desc": "ENS resolution",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/tx/{txhash}",
-                        "desc": "Transaction lookup",
-                        "credits": 0,
-                        "note": "Free"
-                }
+        "community": [
+            {"cmd": "report", "desc": "Submit address labels for review", "credits": "Free"},
+            {"cmd": "list-categories", "desc": "List valid reporting categories", "credits": "Free"},
+            {"cmd": "label-search", "desc": "Search labeled addresses", "credits": "2"},
+            {"cmd": "leaderboard", "desc": "View contributor leaderboard", "credits": "1"},
+            {"cmd": "set-name", "desc": "Set your display name", "credits": "Free"},
         ],
-        "ethereum_advanced": [
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/net-worth",
-                        "desc": "Net worth calculation",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/profile",
-                        "desc": "Full wallet profile",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/rolling-balance",
-                        "desc": "Balance over time",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/stats",
-                        "desc": "Address statistics",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/active-chains",
-                        "desc": "Multichain activity",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/address/{address}/bridge-activity",
-                        "desc": "Bridge activity",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/tx/{txhash}/decoded",
-                        "desc": "Decoded transaction",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/tx/{txhash}/verbose",
-                        "desc": "Full transaction enrichment",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/token/{contract}/metadata",
-                        "desc": "Token metadata",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/token/{contract}/spam-score",
-                        "desc": "Spam detection",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/token/{contract}/holders",
-                        "desc": "Token holder analysis",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/token/{contract}/holders/snapshot",
-                        "desc": "Historical holder snapshot",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/token/{contract}/holder-growth",
-                        "desc": "Holder growth over time",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/token/{contract}/transfers/stream",
-                        "desc": "Real-time transfer stream",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/contract/{address}/info",
-                        "desc": "Contract info and bytecode",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/stablecoins/flows",
-                        "desc": "Stablecoin flows",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/stablecoins/large-transfers",
-                        "desc": "Large stablecoin transfers",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/eth/bridges/flows",
-                        "desc": "Bridge flow analysis",
-                        "credits": 2
-                }
-        ],
-        "opreturn": [
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/opreturn/search",
-                        "desc": "Search OP_RETURN messages",
-                        "credits": 5
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/opreturn/stats",
-                        "desc": "Protocol statistics",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/opreturn/tx/{txid}",
-                        "desc": "OP_RETURN data for transaction",
-                        "credits": 2
-                }
-        ],
-        "labels": [
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/labels/search",
-                        "desc": "Search labeled addresses",
-                        "credits": 2
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/labels/stats",
-                        "desc": "Label database statistics",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/labels/leaderboard",
-                        "desc": "Top contributors",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/labels/categories",
-                        "desc": "Valid label categories",
-                        "credits": 1
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/labels/add",
-                        "desc": "Add label (requires approval)",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/labels/report",
-                        "desc": "Submit label (earn credits)",
-                        "credits": 0,
-                        "note": "Free"
-                }
-        ],
-        "account": [
-                {
-                        "cmd": "status",
-                        "endpoint": "/v1/me",
-                        "desc": "Account info and credits",
-                        "credits": 1
-                }
-        ],
-        "billing": [
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/billing/checkout",
-                        "desc": "Create Stripe checkout session",
-                        "credits": 0,
-                        "note": "Free"
-                },
-                {
-                        "cmd": None,
-                        "endpoint": "/v1/billing/pricing",
-                        "desc": "View credit pack pricing",
-                        "credits": 0,
-                        "note": "Free"
-                }
-        ]
-}
-    
-    # Agent JSON output
+    }
+
     if agent or not sys.stdout.isatty():
-        output = {
-            "commands": ["verdict", "screen", "analyze", "profile", "trace", "query", "status"],
-            "categories": list(endpoints.keys()),
-            "total_endpoints": sum(len(v) for v in endpoints.values()),
-            "endpoints": endpoints,
+        payload = {
+            "commands": [row["cmd"] for rows in commands.values() for row in rows],
+            "categories": list(commands.keys()),
+            "total_commands": sum(len(rows) for rows in commands.values()),
+            "capabilities": commands,
             "privacy": "Provider keys never leave your machine",
+            "docs": "https://blockintql.com/docs/blockintql",
             "source": "https://github.com/block6iq/blockintql-cli",
         }
-        click.echo(json.dumps(output, indent=2))
+        click.echo(json.dumps(payload, indent=2))
         return
-    
-    # Human-readable output
-    console.print(BLOCKINTQL_BANNER)
-    console.print(f"\n[bold]v{__version__}[/bold] [green]●[/green] authenticated · [dim]{load_config().get('credits', 0)} credits[/dim]\n")
-    
-    # Filter by category if specified
-    categories_to_show = {category: endpoints[category]} if category and category in endpoints else endpoints
-    
-    for cat_name, cat_endpoints in categories_to_show.items():
-        # Category header
-        cat_title = cat_name.upper().replace("_", " ")
-        console.print(f"\n[bold cyan]{cat_title}[/bold cyan]")
-        
-        # Create table
-        t = Table(show_header=False, box=None, padding=(0, 2))
-        t.add_column(style="yellow", width=20)
-        t.add_column(style="white")
-        t.add_column(style="dim", justify="right", width=10)
-        
-        for ep in cat_endpoints:
-            cmd_display = ep['cmd'] if ep['cmd'] else ep['endpoint'].split('/')[-1]
-            if ep['credits'] == 0:
-                credits_display = ep.get('note', 'Free')
-            else:
-                credits_display = f"{ep['credits']}"
-            t.add_row(cmd_display, ep['desc'], credits_display)
-        
-        console.print(t)
-    
-    console.print("\n[dim]Docs: [/dim][cyan]https://blockintql.com/docs[/cyan]")
-    console.print("[dim]GitHub: [/dim][cyan]https://github.com/block6iq/blockintql-cli[/cyan]")
 
-def capabilities(install, agent):
-    if install:
-        r = httpx.get(f"{API_BASE}/skills/skill.md", timeout=10)
-        click.echo(r.text)
-        return
-    if agent or not sys.stdout.isatty():
-        click.echo(
-            json.dumps(
-                {
-                    "commands": ["verdict", "screen", "analyze", "profile", "trace", "query", "providers"],
-                    "providers": [p["name"] for p in list_providers()],
-                    "privacy": "Provider keys never leave your machine",
-                    "mcp_server": "https://blockintql-mcp-385334043904.us-central1.run.app/mcp",
-                    "source": "https://github.com/block6iq/blockintql-cli",
-                },
-                indent=2,
-            )
-        )
-        return
-    t = Table(title="BlockINTQL CLI", box=box.ROUNDED, border_style="blue")
-    t.add_column("Command", style="bold yellow", width=12)
-    t.add_column("Description")
-    t.add_column("Example")
-    rows = [
-        ("verdict", "CLEAR/CAUTION/BLOCK", "blockintql verdict --address 1ABC..."),
-        ("screen", "Screen + provider", "blockintql screen --address 0x123... --provider trm --provider-key $KEY"),
-        ("analyze", "Multi-agent analysis", 'blockintql analyze "check for sanctions"'),
-        ("profile", "OP_RETURN identity", "blockintql profile --identifier @handle"),
-        ("trace", "FIFO/LIFO tracing", "blockintql trace --txid abc123..."),
-        ("query", "Natural language", 'blockintql query "is this safe?"'),
-        ("providers", "List providers", "blockintql providers"),
-        ("skills", "Agent skills", "blockintql skills --install >> CONTEXT.md"),
-    ]
-    for r in rows:
-        t.add_row(*r)
-    console.print(t)
-    console.print("\n[dim]Provider keys stay on your machine. BlockINTQL only sees the address.[/]")
-    console.print("[dim]Source: github.com/block6iq/blockintql-cli[/]")
+    console.print(BLOCKINTQL_BANNER)
+    credits = fetch_credits()
+    key = get_api_key()
+    if key:
+        status = f"[green]●[/green] authenticated"
+        if credits is not None:
+            status += f" · [bold]{credits:,}[/bold] credits"
+        else:
+            status += " · [dim]credits: unknown[/dim]"
+    else:
+        status = "[red]●[/red] no API key — run: blockintql init"
+    console.print(f"\n[bold]v{__version__}[/bold]  {status}\n")
+
+    categories_to_show = {category: commands[category]} if category else commands
+    for cat_name, rows in categories_to_show.items():
+        console.print(f"\n[bold cyan]{cat_name.upper()}[/bold cyan]")
+        t = Table(show_header=False, box=None, padding=(0, 2))
+        t.add_column(style="yellow", width=18)
+        t.add_column(style="white")
+        t.add_column(style="dim", justify="right", width=8)
+        for row in rows:
+            t.add_row(row["cmd"], row["desc"], row["credits"])
+        console.print(t)
+
+    console.print("\n[dim]Docs: [/dim][cyan]https://blockintql.com/docs/blockintql[/cyan]")
+    console.print("[dim]GitHub: [/dim][cyan]https://github.com/block6iq/blockintql-cli[/cyan]")
 
 
 @cli.command()
@@ -1284,7 +781,7 @@ def list_categories(agent):
         console.print(f"  {cat}")
 
 
-@cli.command("label-add")
+@cli.command("label-add", hidden=True)
 @click.option("--address", "-a", required=True)
 @click.option("--entity", "-e", required=True)
 @click.option("--category", "-c", default="OTHER")
@@ -1348,170 +845,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-@cli.command()
-@click.argument("name")
-@click.option("--agent", is_flag=True)
-@click.option("--quiet", "-q", is_flag=True)
-def ens(name, agent, quiet):
-    if not quiet and not agent:
-        console.print(f"[dim]Resolving {name}...[/]")
-    result = api_get(f"/v1/eth/ens/{name}")
-    output(result, agent, quiet)
-
-
-@cli.command()
-@click.option('--type', '-t', default='force', type=click.Choice(['force', 'timeline', 'sankey', 'tree']), help='Graph type')
-@click.option('--data', '-d', required=True, help='Input data (JSON file or API result)')
-@click.option('--output', '-o', default='graph.html', help='Output HTML file')
-@click.option('--color-scheme', '-c', default='default', help='Color scheme')
-@pass_config
-def graph(config, type, data, output, color_scheme):
-    """Generate interactive graph visualization from blockchain data"""
-    from blockintql.graph.builder import GraphBuilder
-    from blockintql.graph.templates import GraphTemplate
-    import json
-    
-    click.echo(f"🎨 Building {type} graph...")
-    
-    builder = GraphBuilder()
-    
-    # Load data
-    if data.endswith('.json'):
-        with open(data) as f:
-            json_data = json.load(f)
-    else:
-        # Assume it's a result from a previous command
-        json_data = json.loads(data)
-    
-    # Auto-detect data type and build graph
-    if 'hops' in json_data:
-        builder.from_trace_result(json_data)
-        click.echo(f"  ✓ Loaded trace with {len(json_data['hops'])} hops")
-    elif 'cluster_addresses' in json_data:
-        builder.from_cluster_result(json_data)
-        click.echo(f"  ✓ Loaded cluster with {len(json_data['cluster_addresses'])} addresses")
-    else:
-        # Generic data
-        for node in json_data.get('nodes', []):
-            builder.add_address(node['id'], node.get('label'), node.get('color'))
-        for link in json_data.get('links', []):
-            builder.add_transaction(link.get('txid', 'tx'), link['source'], link['target'], link.get('value'))
-    
-    # Generate HTML
-    html = builder.to_html(template=type)
-    
-    with open(output, 'w') as f:
-        f.write(html)
-    
-    click.echo(f"  ✓ Graph saved to {output}")
-    click.echo(f"\n💡 Open in browser: file://{os.path.abspath(output)}")
-
-@cli.command()
-@click.argument('address')
-@click.option('--depth', '-d', default=2, help='Investigation depth (hops)')
-@click.option('--output', '-o', default=None, help='Output file')
-@pass_config
-def investigate(config, address, depth, output):
-    """🤖 Autonomous investigation with visual graph (agent-native)"""
-    from blockintql.graph.agent import AgentGraph
-    
-    click.echo(f"🔍 Investigating {address}...")
-    click.echo(f"   Depth: {depth} hops")
-    
-    if not config.api_key:
-        click.echo("❌ No API key found. Run: blockintql auth")
-        return
-    
-    # Agent does everything autonomously
-    html = AgentGraph.investigate_address(address, config.api_key, depth)
-    
-    # Save report
-    filepath = AgentGraph.save_report(html, output)
-    
-    click.echo(f"\n✅ Investigation complete!")
-    click.echo(f"📊 Report: file://{filepath}")
-    click.echo(f"\n💡 This same function works for AI agents:")
-    click.echo(f"   from blockintql.graph.agent import AgentGraph")
-    click.echo(f"   html = AgentGraph.investigate_address('{address}', api_key, depth={depth})")
-
-@cli.command()
-@click.argument("address", nargs=-1, required=True)
-@click.option("--chain", "-c", default="bitcoin", type=click.Choice(["bitcoin", "ethereum"]))
-@click.option("--depth", "-d", default=2, type=int, help="Max hops (1-5)")
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
-@click.option("--agent", is_flag=True)
-@click.option("--output", "-o", default=None, help="Save results to file")
-def expand(address, chain, depth, yes, agent, output):
-    """Expand seed addresses to find related wallets. Routes large queries to warehouse automatically."""
-    import time, httpx as _hx
-    addresses = list(address)
-    if not agent:
-        console.print(f"[dim]Estimating query size...[/dim]")
-    est = api_post("/v1/entity/expand/estimate", {"addresses": addresses, "chain": chain, "max_hops": depth})
-    if "error" in est:
-        console.print(f"[red]Estimate failed:[/red] {est['error']}")
-        return
-    tier = est.get("tier", "instant")
-    estimated = est.get("estimated_results", 0)
-    cost = est.get("cost_credits", 5)
-    cost_usd = est.get("cost_usd", 0.05)
-    eta = est.get("estimated_time", "2-5 seconds")
-    if not agent:
-        console.print(f"  [dim]estimated results:[/dim] [bold]{estimated:,}[/bold]")
-        console.print(f"  [dim]tier:            [/dim] [bold]{tier}[/bold]")
-        console.print(f"  [dim]cost:            [/dim] [bold]{cost} credits (${cost_usd:.2f})[/bold]")
-        console.print(f"  [dim]time:            [/dim] [bold]{eta}[/bold]")
-    if not yes and not agent:
-        click.confirm("  Proceed?", abort=True)
-    if tier == "instant":
-        console.print(f"[dim]Running...[/dim]")
-        result = api_post("/v1/entity/expand", {"addresses": addresses, "chain": chain, "max_hops": depth})
-        if output:
-            with open(output, "w") as f: json.dump(result, f, indent=2)
-            console.print(f"  [dim]saved to:[/dim] {output}")
-        else:
-            click.echo(json.dumps(result, indent=2))
-        return
-    console.print(f"[dim]Submitting warehouse job...[/dim]")
-    job = api_post("/v1/warehouse/submit", {"type": "entity_expand", "params": {"addresses": addresses, "chain": chain, "max_hops": depth}, "estimated_time": eta, "cost_credits": cost})
-    if "error" in job:
-        console.print(f"[red]Submit failed:[/red] {job['error']}")
-        return
-    query_id = job.get("query_id")
-    console.print(f"  [dim]job:[/dim] {query_id}")
-    console.print(f"  [dim]polling every 5s (Ctrl+C stops watching, job continues)[/dim]\n")
-    start = time.time()
-    spin = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
-    i = 0
-    cfg = load_config()
-    headers = {"Authorization": f"Bearer {cfg.get('api_key', '')}"}
-    while True:
-        try:
-            r = _hx.get(f"{API_BASE}/v1/warehouse/status/{query_id}", headers=headers, timeout=10)
-            s = r.json()
-        except Exception:
-            s = {}
-        status = s.get("status", "queued")
-        elapsed = int(time.time() - start)
-        m, sec = divmod(elapsed, 60)
-        if status == "complete":
-            console.print(f"\r  [green]✓ Complete![/green] {m}m{sec:02d}s")
-            results_url = s.get("results_url", "")
-            console.print(f"  [dim]results:[/dim] {results_url}")
-            if output and results_url:
-                try:
-                    r2 = _hx.get(results_url, timeout=60)
-                    with open(output, "w") as f: f.write(r2.text)
-                    console.print(f"  [dim]saved to:[/dim] {output}")
-                except Exception as e:
-                    console.print(f"  [yellow]Download failed: {e}[/yellow]")
-            break
-        elif status == "failed":
-            console.print(f"\r  [red]✗ Failed:[/red] {s.get('error', 'Unknown')}")
-            break
-        else:
-            print(f"\r  {spin[i % len(spin)]} {status} · {m}m{sec:02d}s", end="", flush=True)
-            i += 1
-            time.sleep(5)
