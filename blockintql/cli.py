@@ -633,6 +633,61 @@ def render_plan(data):
     console.print()
 
 
+def execute_planned_first_step(plan, address):
+    steps = plan.get("steps") or []
+    if not steps:
+        return {"error": "No executable steps in plan"}
+
+    step = steps[0]
+    capability_id = step.get("capability_id")
+
+    if capability_id == "verdict":
+        if not address:
+            return {"error": "Address required to execute verdict"}
+        return api_post("/v1/verdict", {"address": address, "chain": "ethereum"})
+
+    if capability_id == "screen":
+        if not address:
+            return {"error": "Address required to execute screen"}
+        return api_post("/v1/screen", {"address": address, "chain": "ethereum"})
+
+    if capability_id == "stablecoin_balances":
+        if not address:
+            return {"error": "Address required to fetch stablecoin balances"}
+        return api_get(f"/v1/eth/address/{address}/stablecoins")
+
+    if capability_id == "stablecoin_counterparties":
+        if not address:
+            return {"error": "Address required to fetch stablecoin counterparties"}
+        return api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params={"direction": "both", "days": 30, "limit": 25})
+
+    if capability_id == "stablecoin_history":
+        if not address:
+            return {"error": "Address required to fetch stablecoin history"}
+        return api_get(f"/v1/eth/address/{address}/stablecoin-history", params={"days": 30, "interval": "day"})
+
+    if capability_id == "stablecoin_flows":
+        return api_get("/v1/eth/stablecoins/flows", params={"hours": 24, "interval": "hour"})
+
+    return {"error": f"First planned step '{capability_id}' is not executable from ask yet"}
+
+
+def open_planned_workspace(plan, address, goal):
+    steps = plan.get("steps") or []
+    has_workspace = any(step.get("capability_id") == "workspace_create" for step in steps)
+    if not has_workspace:
+        return {"error": "Plan does not recommend a workspace"}
+
+    slug = "".join(c.lower() if c.isalnum() else "-" for c in (goal or "workspace"))[:32].strip("-") or "workspace"
+    modules = ["verdict", "stablecoins", "bridge-activity", "chart"]
+    if any(step.get("capability_id") == "stablecoin_counterparties" for step in steps):
+        modules.append("counterparties")
+    body = {"name": slug, "chain": "ethereum", "modules": modules}
+    if address:
+        body["address"] = address
+    return api_post("/v1/workspaces/create", body)
+
+
 def output(data, agent, quiet):
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps(data, indent=2, default=str))
@@ -1028,9 +1083,11 @@ def query(query, agent, quiet):
 @click.option("--budget-credits", type=int, default=None)
 @click.option("--budget-usd", type=float, default=None)
 @click.option("--surface", "prefer_surface", default="auto", type=click.Choice(["auto", "api", "cli", "mcp", "workspace"]))
+@click.option("--execute-first-step", is_flag=True, help="Execute the first recommended sync step after planning")
+@click.option("--open-workspace", is_flag=True, help="Create a workspace if the plan recommends one")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, agent, quiet):
+def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, execute_first_step, open_workspace, agent, quiet):
     if not quiet and not agent:
         console.print("[dim]Planning investigation workflow...[/]")
     body = {
@@ -1042,6 +1099,10 @@ def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, agent,
         "prefer_surface": prefer_surface,
     }
     result = api_post("/v1/plan", body)
+    if "error" not in result and open_workspace:
+        result = open_planned_workspace(result, address, goal)
+    elif "error" not in result and execute_first_step:
+        result = execute_planned_first_step(result, address)
     output(result, agent, quiet)
 
 
