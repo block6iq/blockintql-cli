@@ -1154,7 +1154,8 @@ def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, execut
         "budget_credits": budget_credits,
         "budget_usd": budget_usd,
         "prefer_surface": prefer_surface,
-        "execute": bool(execute_first_step or open_workspace),
+        "execute": bool(execute_first_step),
+        "execute_workspace": bool(open_workspace),
     }
     result = api_post("/v1/plan", body, require_auth=False)
     if "error" in result and (execute_first_step or open_workspace) and should_retry_plan_without_execution(result):
@@ -1168,7 +1169,12 @@ def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, execut
             }
             result = fallback
     if "error" not in result and open_workspace:
-        result = open_planned_workspace(result, address, goal)
+        if result.get("execution_skipped"):
+            pass
+        elif result.get("executed_workspace") is not None:
+            result = result["executed_workspace"]
+        else:
+            result = open_planned_workspace(result, address, goal)
     elif "error" not in result and execute_first_step:
         if result.get("execution_skipped"):
             pass
