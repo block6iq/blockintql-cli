@@ -468,6 +468,85 @@ def render_stablecoin_large_transfers(data):
     console.print()
 
 
+def render_wallet_stablecoin_chart(data):
+    payload = data.get("data", data)
+    rows = payload.get("rows", [])
+    console.print()
+    console.print("  [bold cyan]Wallet stablecoin chart[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
+    console.print(f"  [dim]window   [/dim] {payload.get('days', 0)} days · {payload.get('interval', 'day')}")
+    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
+    if not rows:
+        console.print("  [yellow]No stablecoin history found for this wallet and time window[/yellow]")
+        console.print()
+        return
+
+    grouped = {}
+    for row in rows:
+        token = row.get("token_symbol", "UNK")
+        grouped.setdefault(token, []).append(float(row.get("net_amount") or 0))
+
+    print_rule()
+    for token, values in list(grouped.items())[:4]:
+        latest = values[:8]
+        max_abs = max(abs(v) for v in latest) if latest else 1
+        spark = []
+        for value in latest:
+            if max_abs == 0:
+                spark.append("·")
+            elif value > 0:
+                spark.append("▇" if abs(value) / max_abs > 0.66 else "▅" if abs(value) / max_abs > 0.33 else "▃")
+            elif value < 0:
+                spark.append("▁" if abs(value) / max_abs > 0.66 else "▂" if abs(value) / max_abs > 0.33 else "·")
+            else:
+                spark.append("·")
+        console.print(f"  [dim]{token:<5}[/dim] {''.join(spark)}  net {round(sum(latest), 2)}")
+    console.print()
+
+
+def render_counterparty_chart(data):
+    payload = data.get("data", data)
+    rows = payload.get("counterparties", [])
+    console.print()
+    console.print("  [bold cyan]Stablecoin counterparty chart[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
+    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
+    console.print(f"  [dim]window   [/dim] {payload.get('days', 0)} days")
+    if not rows:
+        console.print("  [yellow]No counterparties found for this filter set[/yellow]")
+        console.print()
+        return
+
+    max_amount = max(float(row.get("total_amount") or 0) for row in rows[:8]) or 1
+    print_rule()
+    for row in rows[:8]:
+        counterparty = row.get("counterparty", "unknown")
+        if len(counterparty) > 18:
+            counterparty = f"{counterparty[:8]}...{counterparty[-6:]}"
+        amount = float(row.get("total_amount") or 0)
+        bar_length = max(1, int((amount / max_amount) * 24))
+        console.print(
+            f"  [dim]{counterparty:<20}[/dim] "
+            f"{'█' * bar_length} {round(amount, 2)}"
+        )
+    console.print()
+
+
+def render_workspace_plan(name, chain, modules):
+    console.print()
+    console.print("  [bold cyan]Workspace plan[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]name     [/dim] {name}")
+    console.print(f"  [dim]chain    [/dim] {chain}")
+    console.print(f"  [dim]modules  [/dim] {', '.join(modules)}")
+    print_rule()
+    console.print("  [dim]This will map to an ephemeral investigation workspace once the VM control plane is live.[/dim]")
+    console.print("  [dim]Recommended modules: verdict, stablecoins, bridge-activity, chart[/dim]")
+    console.print()
+
+
 def output(data, agent, quiet):
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps(data, indent=2, default=str))
@@ -1002,6 +1081,66 @@ def chart_stablecoin_flows(hours, interval, token, agent):
         params["token"] = token
     result = api_get("/v1/eth/stablecoins/flows", params=params)
     output(result, agent, False)
+
+
+@chart.command("wallet-stablecoins")
+@click.argument("address")
+@click.option("--days", default=30, type=int)
+@click.option("--interval", default="day", type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+def chart_wallet_stablecoins(address, days, interval, token, agent):
+    params = {"days": days, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params=params)
+    if agent or not sys.stdout.isatty():
+        output(result, agent, False)
+        return
+    if "error" in result:
+        output(result, agent, False)
+        return
+    render_wallet_stablecoin_chart(result)
+
+
+@chart.command("counterparties")
+@click.argument("address")
+@click.option("--token", default=None)
+@click.option("--direction", default="both", type=click.Choice(["inbound", "outbound", "both"]))
+@click.option("--days", default=30, type=int)
+@click.option("--limit", default=25, type=int)
+@click.option("--agent", is_flag=True)
+def chart_counterparties(address, token, direction, days, limit, agent):
+    params = {"direction": direction, "days": days, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params=params)
+    if agent or not sys.stdout.isatty():
+        output(result, agent, False)
+        return
+    if "error" in result:
+        output(result, agent, False)
+        return
+    render_counterparty_chart(result)
+
+
+@cli.group(hidden=True)
+def workspace():
+    """Ephemeral investigation workspace controls."""
+
+
+@workspace.command("create")
+@click.argument("name")
+@click.option("--chain", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--modules", default="verdict,stablecoins,bridge-activity,chart")
+@click.option("--agent", is_flag=True)
+def workspace_create(name, chain, modules, agent):
+    module_list = [m.strip() for m in modules.split(",") if m.strip()]
+    payload = {"name": name, "chain": chain, "modules": module_list, "status": "planned"}
+    if agent or not sys.stdout.isatty():
+        click.echo(json.dumps(payload, indent=2))
+        return
+    render_workspace_plan(name, chain, module_list)
 
 
 @cli.command()
