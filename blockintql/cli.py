@@ -613,6 +613,10 @@ def render_plan(data):
     console.print(f"  [dim]chain    [/dim] {data.get('chain', '')}")
     console.print(f"  [dim]surface  [/dim] {data.get('recommended_surface', 'api')}")
     console.print(f"  [dim]estimate [/dim] {data.get('estimated_total_credits', 0)} credits · ${data.get('estimated_total_usd', 0)}")
+    if data.get("upto_budget_usd") not in (None, 0, 0.0):
+        console.print(f"  [dim]upto     [/dim] ${data.get('upto_budget_usd')} suggested ceiling")
+    if data.get("execution_mode"):
+        console.print(f"  [dim]mode     [/dim] {data.get('execution_mode')}")
     if data.get("summary"):
         print_rule()
         console.print(f"  [dim]{data['summary']}[/dim]")
@@ -628,43 +632,56 @@ def render_plan(data):
                 console.print(f"     [dim]endpoint:[/dim] {step['endpoint']}")
             if step.get("cli_command"):
                 console.print(f"     [dim]cli:[/dim] {step['cli_command']}")
+    first_step = data.get("first_executable_step")
+    workspace = data.get("recommended_workspace")
+    if first_step or workspace:
+        print_rule()
+    if first_step:
+        console.print(f"  [dim]first executable:[/dim] {first_step.get('title', first_step.get('capability_id', ''))}")
+    if workspace:
+        console.print(f"  [dim]workspace:[/dim] {workspace.get('name')} [{', '.join(workspace.get('modules', []))}]")
     print_rule()
-    console.print("  [dim]Next: run the first step directly or use this plan inside your own agent workflow[/dim]")
+    console.print("  [dim]Next: run the first executable step directly, open the recommended workspace, or pass this plan into your own agent workflow[/dim]")
     console.print()
 
 
 def execute_planned_first_step(plan, address):
-    steps = plan.get("steps") or []
-    if not steps:
-        return {"error": "No executable steps in plan"}
+    step = plan.get("first_executable_step")
+    if not step:
+        steps = plan.get("steps") or []
+        if not steps:
+            return {"error": "No executable steps in plan"}
+        step = steps[0]
 
-    step = steps[0]
+    if not step:
+        return {"error": "No executable steps in plan"}
     capability_id = step.get("capability_id")
+    plan_address = plan.get("address") or address
 
     if capability_id == "verdict":
-        if not address:
+        if not plan_address:
             return {"error": "Address required to execute verdict"}
-        return api_post("/v1/verdict", {"address": address, "chain": "ethereum"})
+        return api_post("/v1/verdict", {"address": plan_address, "chain": "ethereum"})
 
     if capability_id == "screen":
-        if not address:
+        if not plan_address:
             return {"error": "Address required to execute screen"}
-        return api_post("/v1/screen", {"address": address, "chain": "ethereum"})
+        return api_post("/v1/screen", {"address": plan_address, "chain": "ethereum"})
 
     if capability_id == "stablecoin_balances":
-        if not address:
+        if not plan_address:
             return {"error": "Address required to fetch stablecoin balances"}
-        return api_get(f"/v1/eth/address/{address}/stablecoins")
+        return api_get(f"/v1/eth/address/{plan_address}/stablecoins")
 
     if capability_id == "stablecoin_counterparties":
-        if not address:
+        if not plan_address:
             return {"error": "Address required to fetch stablecoin counterparties"}
-        return api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params={"direction": "both", "days": 30, "limit": 25})
+        return api_get(f"/v1/eth/address/{plan_address}/stablecoin-counterparties", params={"direction": "both", "days": 30, "limit": 25})
 
     if capability_id == "stablecoin_history":
-        if not address:
+        if not plan_address:
             return {"error": "Address required to fetch stablecoin history"}
-        return api_get(f"/v1/eth/address/{address}/stablecoin-history", params={"days": 30, "interval": "day"})
+        return api_get(f"/v1/eth/address/{plan_address}/stablecoin-history", params={"days": 30, "interval": "day"})
 
     if capability_id == "stablecoin_flows":
         return api_get("/v1/eth/stablecoins/flows", params={"hours": 24, "interval": "hour"})
@@ -673,6 +690,19 @@ def execute_planned_first_step(plan, address):
 
 
 def open_planned_workspace(plan, address, goal):
+    workspace = plan.get("recommended_workspace")
+    if workspace:
+        body = dict(workspace.get("payload") or {})
+        if not body.get("name"):
+            body["name"] = workspace.get("name") or "workspace"
+        if not body.get("chain"):
+            body["chain"] = plan.get("chain") or "ethereum"
+        if not body.get("modules"):
+            body["modules"] = workspace.get("modules") or ["verdict", "stablecoins", "bridge-activity", "chart"]
+        if address and "address" not in body:
+            body["address"] = address
+        return api_post("/v1/workspaces/create", body)
+
     steps = plan.get("steps") or []
     has_workspace = any(step.get("capability_id") == "workspace_create" for step in steps)
     if not has_workspace:
@@ -1097,6 +1127,7 @@ def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, execut
         "budget_credits": budget_credits,
         "budget_usd": budget_usd,
         "prefer_surface": prefer_surface,
+        "execute": bool(execute_first_step or open_workspace),
     }
     result = api_post("/v1/plan", body)
     if "error" not in result and open_workspace:
