@@ -547,6 +547,32 @@ def render_workspace_plan(name, chain, modules):
     console.print()
 
 
+def render_workspace_status(data):
+    console.print()
+    console.print("  [bold cyan]Workspace[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]id       [/dim] {data.get('workspace_id', '')}")
+    console.print(f"  [dim]name     [/dim] {data.get('name', '')}")
+    console.print(f"  [dim]chain    [/dim] {data.get('chain', '')}")
+    console.print(f"  [dim]status   [/dim] {data.get('status', '')}")
+    console.print(f"  [dim]modules  [/dim] {', '.join(data.get('modules', []))}")
+    if data.get("access_url"):
+        console.print(f"  [dim]url      [/dim] {data.get('access_url')}")
+    if data.get("ssh"):
+        console.print(f"  [dim]ssh      [/dim] {data.get('ssh')}")
+    notes = data.get("notes") or []
+    if notes:
+        print_rule()
+        for note in notes[:4]:
+            console.print(f"  [dim]• {note}[/dim]")
+    print_rule()
+    if data.get("status") in {"queued", "provisioning", "planned", "terminating"}:
+        console.print(f"  [dim]Next: blockintql workspace status {data.get('workspace_id', '')}[/dim]")
+    elif data.get("status") == "ready":
+        console.print(f"  [dim]Next: blockintql workspace destroy {data.get('workspace_id', '')}[/dim]")
+    console.print()
+
+
 def output(data, agent, quiet):
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps(data, indent=2, default=str))
@@ -655,6 +681,10 @@ def output(data, agent, quiet):
 
     if "rows" in data.get("data", {}) and "min_amount" in data.get("data", {}):
         render_stablecoin_large_transfers(data)
+        return
+
+    if "workspace_id" in data and "modules" in data and "status" in data:
+        render_workspace_status(data)
         return
 
     if not quiet:
@@ -1136,11 +1166,28 @@ def workspace():
 @click.option("--agent", is_flag=True)
 def workspace_create(name, chain, modules, agent):
     module_list = [m.strip() for m in modules.split(",") if m.strip()]
-    payload = {"name": name, "chain": chain, "modules": module_list, "status": "planned"}
-    if agent or not sys.stdout.isatty():
-        click.echo(json.dumps(payload, indent=2))
-        return
-    render_workspace_plan(name, chain, module_list)
+    if not agent and sys.stdout.isatty():
+        console.print("[dim]Provisioning investigation workspace...[/]")
+    result = api_post("/v1/workspaces/create", {"name": name, "chain": chain, "modules": module_list})
+    output(result, agent, False)
+
+
+@workspace.command("status")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+def workspace_status(workspace_id, agent):
+    result = api_get(f"/v1/workspaces/{workspace_id}")
+    output(result, agent, False)
+
+
+@workspace.command("destroy")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+def workspace_destroy(workspace_id, agent):
+    if not agent and sys.stdout.isatty():
+        console.print("[dim]Destroying workspace...[/]")
+    result = api_post(f"/v1/workspaces/{workspace_id}/destroy", {})
+    output(result, agent, False)
 
 
 @cli.command()
