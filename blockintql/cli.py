@@ -62,9 +62,17 @@ def get_headers():
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
+def get_optional_headers():
+    key = get_api_key()
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
 def api_get(path, params=None, require_auth=True):
     try:
-        headers = get_headers() if require_auth else {"Content-Type": "application/json"}
+        headers = get_headers() if require_auth else get_optional_headers()
         r = httpx.get(f"{API_BASE}{path}", headers=headers, params=params, timeout=30)
         data = r.json() if r.text else {}
         if r.status_code >= 400:
@@ -112,7 +120,7 @@ def show_credit_after(command_name):
 
 def api_post(path, body, require_auth=True):
     try:
-        headers = get_headers() if require_auth else {"Content-Type": "application/json"}
+        headers = get_headers() if require_auth else get_optional_headers()
         r = httpx.post(f"{API_BASE}{path}", headers=headers, json=body, timeout=60)
         data = r.json() if r.text else {}
         if r.status_code >= 400:
@@ -634,12 +642,18 @@ def render_plan(data):
                 console.print(f"     [dim]cli:[/dim] {step['cli_command']}")
     first_step = data.get("first_executable_step")
     workspace = data.get("recommended_workspace")
+    execution_skipped = data.get("execution_skipped")
     if first_step or workspace:
         print_rule()
     if first_step:
         console.print(f"  [dim]first executable:[/dim] {first_step.get('title', first_step.get('capability_id', ''))}")
     if workspace:
         console.print(f"  [dim]workspace:[/dim] {workspace.get('name')} [{', '.join(workspace.get('modules', []))}]")
+    if execution_skipped:
+        print_rule()
+        console.print(f"  [yellow]execution skipped[/yellow] [dim]· {execution_skipped.get('reason', '')}[/dim]")
+        if execution_skipped.get("next"):
+            console.print(f"  [dim]{execution_skipped.get('next')}[/dim]")
     print_rule()
     console.print("  [dim]Next: run the first executable step directly, open the recommended workspace, or pass this plan into your own agent workflow[/dim]")
     console.print()
@@ -716,6 +730,19 @@ def open_planned_workspace(plan, address, goal):
     if address:
         body["address"] = address
     return api_post("/v1/workspaces/create", body)
+
+
+def should_retry_plan_without_execution(data):
+    if "error" not in data:
+        return False
+    text = f"{data.get('error', '')} {data.get('friendly_error', '')}".lower()
+    triggers = [
+        "api key required",
+        "requires available credits",
+        "x402 payment",
+        "missing api key",
+    ]
+    return any(trigger in text for trigger in triggers)
 
 
 def output(data, agent, quiet):
@@ -1129,11 +1156,23 @@ def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, execut
         "prefer_surface": prefer_surface,
         "execute": bool(execute_first_step or open_workspace),
     }
-    result = api_post("/v1/plan", body)
+    result = api_post("/v1/plan", body, require_auth=False)
+    if "error" in result and (execute_first_step or open_workspace) and should_retry_plan_without_execution(result):
+        fallback_body = dict(body)
+        fallback_body["execute"] = False
+        fallback = api_post("/v1/plan", fallback_body, require_auth=False)
+        if "error" not in fallback:
+            fallback["execution_skipped"] = {
+                "reason": "Execution requires credits or payment authorization",
+                "next": "Authenticate with an API key, add credits, or enable x402 before executing actions",
+            }
+            result = fallback
     if "error" not in result and open_workspace:
         result = open_planned_workspace(result, address, goal)
     elif "error" not in result and execute_first_step:
-        if result.get("executed_action", {}).get("result") is not None:
+        if result.get("execution_skipped"):
+            pass
+        elif result.get("executed_action", {}).get("result") is not None:
             result = result["executed_action"]["result"]
         else:
             result = execute_planned_first_step(result, address)
