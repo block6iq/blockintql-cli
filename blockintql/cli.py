@@ -337,6 +337,137 @@ def render_opreturn_tx(data):
     console.print()
 
 
+def render_stablecoin_balances(data):
+    payload = data.get("data", data)
+    balances = payload.get("stablecoin_balances", {})
+    console.print()
+    console.print("  [bold cyan]Stablecoin balances[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
+    console.print(f"  [dim]total    [/dim] ${payload.get('wallet_total_usd', 0)}")
+    coverage = payload.get("coverage", {})
+    if coverage.get("coverage_note"):
+        console.print(f"  [dim]coverage [/dim] {coverage['coverage_note']}")
+    if balances:
+        print_rule()
+        for symbol, item in balances.items():
+            console.print(f"  [dim]{symbol:<8}[/dim] {item.get('balance', 0)}")
+    console.print()
+
+
+def render_stablecoin_history(data):
+    payload = data.get("data", data)
+    rows = payload.get("rows", [])
+    console.print()
+    console.print("  [bold cyan]Stablecoin history[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
+    console.print(f"  [dim]window   [/dim] {payload.get('days', 0)} days · {payload.get('interval', 'day')}")
+    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
+    if not rows:
+        console.print("  [yellow]No stablecoin history found for this wallet and time window[/yellow]")
+        console.print()
+        return
+    print_rule()
+    for row in rows[:8]:
+        bucket = str(row.get("bucket", ""))[:19]
+        console.print(
+            f"  [dim]{bucket}[/dim]  "
+            f"{row.get('token_symbol', ''):<5}  "
+            f"+{row.get('incoming_amount', 0)}  "
+            f"-{row.get('outgoing_amount', 0)}  "
+            f"net {row.get('net_amount', 0)}"
+        )
+    console.print()
+
+
+def render_stablecoin_counterparties(data):
+    payload = data.get("data", data)
+    rows = payload.get("counterparties", [])
+    console.print()
+    console.print("  [bold cyan]Stablecoin counterparties[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
+    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
+    console.print(f"  [dim]window   [/dim] {payload.get('days', 0)} days")
+    console.print(f"  [dim]dir      [/dim] {payload.get('direction', 'both')}")
+    if not rows:
+        console.print("  [yellow]No stablecoin counterparties found for this wallet and filter set[/yellow]")
+        console.print()
+        return
+    print_rule()
+    for row in rows[:8]:
+        counterparty = row.get("counterparty", "unknown")
+        if len(counterparty) > 18:
+            counterparty = f"{counterparty[:8]}...{counterparty[-6:]}"
+        console.print(
+            f"  [dim]{row.get('token_symbol', ''):<5}[/dim] "
+            f"{counterparty:<20} "
+            f"{row.get('direction', ''):<8} "
+            f"{row.get('total_amount', 0)}"
+        )
+    console.print()
+
+
+def render_stablecoin_flows(data):
+    payload = data.get("data", data)
+    series = payload.get("series", [])
+    console.print()
+    console.print("  [bold cyan]Stablecoin flows[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]window   [/dim] {payload.get('hours', 0)} hours")
+    console.print(f"  [dim]interval [/dim] {payload.get('interval', 'hour')}")
+    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
+    summary = payload.get("summary", {})
+    if summary:
+        top = sorted(summary.items(), key=lambda kv: kv[1].get("total_volume", 0), reverse=True)[:4]
+        print_rule()
+        for symbol, stats in top:
+            console.print(f"  [dim]{symbol:<5}[/dim] volume {round(stats.get('total_volume', 0), 2)} · txs {stats.get('transfer_count', 0)}")
+    if not series:
+        console.print("  [yellow]No stablecoin flow activity found for this window[/yellow]")
+        console.print()
+        return
+    print_rule()
+    for row in series[:10]:
+        bucket = str(row.get("bucket", ""))[:19]
+        volume = float(row.get("total_volume") or 0)
+        bar_length = min(24, max(1, int(volume / 100000))) if volume > 0 else 0
+        bar = "█" * bar_length
+        console.print(
+            f"  [dim]{bucket}[/dim] "
+            f"{row.get('token_symbol', ''):<5} "
+            f"{bar} {round(volume, 2)}"
+        )
+    console.print()
+
+
+def render_stablecoin_large_transfers(data):
+    payload = data.get("data", data)
+    rows = payload.get("rows", [])
+    console.print()
+    console.print("  [bold cyan]Large stablecoin transfers[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
+    console.print(f"  [dim]window   [/dim] {payload.get('hours', 0)} hours")
+    console.print(f"  [dim]minimum  [/dim] {payload.get('min_amount', 0)}")
+    console.print(f"  [dim]count    [/dim] {payload.get('count', len(rows))}")
+    if not rows:
+        console.print("  [yellow]No large stablecoin transfers found for this filter set[/yellow]")
+        console.print()
+        return
+    print_rule()
+    for row in rows[:8]:
+        tx_hash = row.get("tx_hash", "")
+        short_tx = f"{tx_hash[:8]}...{tx_hash[-6:]}" if len(tx_hash) > 16 else tx_hash
+        console.print(
+            f"  [dim]{row.get('token_symbol', ''):<5}[/dim] "
+            f"{short_tx:<18} "
+            f"{row.get('amount', 0)}"
+        )
+    console.print()
+
+
 def output(data, agent, quiet):
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps(data, indent=2, default=str))
@@ -425,6 +556,26 @@ def output(data, agent, quiet):
 
     if "tx_hash" in data and "found" in data and "guidance" in data:
         render_opreturn_tx(data)
+        return
+
+    if ("stablecoin_balances" in data.get("data", {}) or "stablecoin_balances" in data) and "coverage" in data.get("data", data):
+        render_stablecoin_balances(data)
+        return
+
+    if "rows" in data.get("data", {}) and "interval" in data.get("data", {}) and "days" in data.get("data", {}):
+        render_stablecoin_history(data)
+        return
+
+    if "counterparties" in data.get("data", {}) and "direction" in data.get("data", {}):
+        render_stablecoin_counterparties(data)
+        return
+
+    if "series" in data.get("data", {}) and "summary" in data.get("data", {}):
+        render_stablecoin_flows(data)
+        return
+
+    if "rows" in data.get("data", {}) and "min_amount" in data.get("data", {}):
+        render_stablecoin_large_transfers(data)
         return
 
     if not quiet:
@@ -556,6 +707,8 @@ def cli(ctx):
         console.print()
         console.print("  [bold]DATA[/bold]")
         console.print("    providers         List enrichment providers")
+        console.print("    stablecoins       Stablecoin intelligence and wallet views")
+        console.print("    chart             Terminal-native chart views")
         console.print()
         console.print("  [bold]COMMUNITY[/bold]  [dim](free)[/dim]")
         console.print("    report            Report address(es) for review")
@@ -749,6 +902,108 @@ def providers(agent):
     console.print(t)
 
 
+@cli.group()
+def stablecoins():
+    """Stablecoin intelligence commands."""
+
+
+@stablecoins.command("balances")
+@click.argument("address")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoin_balances(address, agent, quiet):
+    if not quiet and not agent:
+        console.print(f"[dim]Loading stablecoin balances for {address[:20]}...[/]")
+    result = api_get(f"/v1/eth/address/{address}/stablecoins")
+    output(result, agent, quiet)
+
+
+@stablecoins.command("history")
+@click.argument("address")
+@click.option("--days", default=30, type=int)
+@click.option("--interval", default="day", type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoin_history(address, days, interval, token, agent, quiet):
+    if not quiet and not agent:
+        console.print(f"[dim]Building stablecoin history for {address[:20]}...[/]")
+    params = {"days": days, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params=params)
+    output(result, agent, quiet)
+
+
+@stablecoins.command("counterparties")
+@click.argument("address")
+@click.option("--token", default=None)
+@click.option("--direction", default="both", type=click.Choice(["inbound", "outbound", "both"]))
+@click.option("--days", default=30, type=int)
+@click.option("--limit", default=25, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoin_counterparties(address, token, direction, days, limit, agent, quiet):
+    if not quiet and not agent:
+        console.print(f"[dim]Resolving stablecoin counterparties for {address[:20]}...[/]")
+    params = {"direction": direction, "days": days, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params=params)
+    output(result, agent, quiet)
+
+
+@stablecoins.command("flows")
+@click.option("--hours", default=24, type=int)
+@click.option("--interval", default="hour", type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoin_flows(hours, interval, token, agent, quiet):
+    if not quiet and not agent:
+        console.print("[dim]Loading network stablecoin flows...[/]")
+    params = {"hours": hours, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get("/v1/eth/stablecoins/flows", params=params)
+    output(result, agent, quiet)
+
+
+@stablecoins.command("large-transfers")
+@click.option("--min-amount", default=100000, type=float)
+@click.option("--hours", default=24, type=int)
+@click.option("--token", default=None)
+@click.option("--limit", default=100, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoin_large_transfers(min_amount, hours, token, limit, agent, quiet):
+    if not quiet and not agent:
+        console.print("[dim]Loading large stablecoin transfers...[/]")
+    params = {"min_amount": min_amount, "hours": hours, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get("/v1/eth/stablecoins/large-transfers", params=params)
+    output(result, agent, quiet)
+
+
+@cli.group()
+def chart():
+    """Terminal-native chart views."""
+
+
+@chart.command("stablecoin-flows")
+@click.option("--hours", default=24, type=int)
+@click.option("--interval", default="hour", type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+def chart_stablecoin_flows(hours, interval, token, agent):
+    params = {"hours": hours, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get("/v1/eth/stablecoins/flows", params=params)
+    output(result, agent, False)
+
+
 @cli.command()
 @click.option("--install", is_flag=True)
 @click.option("--agent", is_flag=True)
@@ -780,6 +1035,8 @@ def capabilities(install, agent, category):
         ],
         "data": [
             {"cmd": "providers", "desc": "List local enrichment providers", "credits": "Free"},
+            {"cmd": "stablecoins", "desc": "Stablecoin intelligence commands", "credits": "Varies"},
+            {"cmd": "chart", "desc": "Terminal-native chart views", "credits": "Varies"},
         ],
         "community": [
             {"cmd": "report", "desc": "Submit address labels for review", "credits": "Free"},
