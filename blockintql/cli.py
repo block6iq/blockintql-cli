@@ -573,6 +573,66 @@ def render_workspace_status(data):
     console.print()
 
 
+def render_capability_catalog(data):
+    console.print()
+    console.print("  [bold cyan]Capabilities[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]surfaces [/dim] {', '.join(data.get('surfaces', []))}")
+    console.print(f"  [dim]version  [/dim] {data.get('version', 'unknown')}")
+    notes = data.get("notes") or []
+    if notes:
+        for note in notes[:2]:
+            console.print(f"  [dim]• {note}[/dim]")
+    print_rule()
+
+    grouped = {}
+    for item in data.get("capabilities", []):
+        grouped.setdefault(item.get("category", "other"), []).append(item)
+
+    for category, rows in grouped.items():
+        console.print(f"  [bold]{category.upper()}[/bold]")
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column(style="yellow", width=24)
+        table.add_column(style="white")
+        table.add_column(style="dim", justify="right", width=8)
+        for row in rows:
+            cost = row.get("estimated_cost", {}).get("credits")
+            cost_label = "Free" if cost in (None, 0) and not row.get("price_usd") else str(cost) if cost is not None else "Varies"
+            table.add_row(row.get("id", ""), row.get("description", ""), cost_label)
+        console.print(table)
+    console.print()
+
+
+def render_plan(data):
+    console.print()
+    console.print("  [bold cyan]Investigation plan[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]goal     [/dim] {data.get('goal', '')}")
+    if data.get("address"):
+        console.print(f"  [dim]address  [/dim] {data.get('address')}")
+    console.print(f"  [dim]chain    [/dim] {data.get('chain', '')}")
+    console.print(f"  [dim]surface  [/dim] {data.get('recommended_surface', 'api')}")
+    console.print(f"  [dim]estimate [/dim] {data.get('estimated_total_credits', 0)} credits · ${data.get('estimated_total_usd', 0)}")
+    if data.get("summary"):
+        print_rule()
+        console.print(f"  [dim]{data['summary']}[/dim]")
+    steps = data.get("steps") or []
+    if steps:
+        print_rule()
+        for idx, step in enumerate(steps, start=1):
+            cost = step.get("estimated_credits")
+            cost_label = f"{cost} cr" if cost is not None else "varies"
+            console.print(f"  [bold]{idx}. {step.get('title', '')}[/bold] [dim]({step.get('surface', 'api')} · {cost_label})[/dim]")
+            console.print(f"     {step.get('rationale', '')}")
+            if step.get("endpoint"):
+                console.print(f"     [dim]endpoint:[/dim] {step['endpoint']}")
+            if step.get("cli_command"):
+                console.print(f"     [dim]cli:[/dim] {step['cli_command']}")
+    print_rule()
+    console.print("  [dim]Next: run the first step directly or use this plan inside your own agent workflow[/dim]")
+    console.print()
+
+
 def output(data, agent, quiet):
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps(data, indent=2, default=str))
@@ -685,6 +745,14 @@ def output(data, agent, quiet):
 
     if "workspace_id" in data and "modules" in data and "status" in data:
         render_workspace_status(data)
+        return
+
+    if "capabilities" in data and "surfaces" in data:
+        render_capability_catalog(data)
+        return
+
+    if "goal" in data and "steps" in data and "estimated_total_credits" in data:
+        render_plan(data)
         return
 
     if not quiet:
@@ -953,6 +1021,30 @@ def query(query, agent, quiet):
     output(result, agent, quiet)
 
 
+@cli.command()
+@click.argument("goal")
+@click.option("--address", "-a", default="")
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--budget-credits", type=int, default=None)
+@click.option("--budget-usd", type=float, default=None)
+@click.option("--surface", "prefer_surface", default="auto", type=click.Choice(["auto", "api", "cli", "mcp", "workspace"]))
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, agent, quiet):
+    if not quiet and not agent:
+        console.print("[dim]Planning investigation workflow...[/]")
+    body = {
+        "goal": goal,
+        "address": address,
+        "chain": chain,
+        "budget_credits": budget_credits,
+        "budget_usd": budget_usd,
+        "prefer_surface": prefer_surface,
+    }
+    result = api_post("/v1/plan", body)
+    output(result, agent, quiet)
+
+
 
 @cli.command(hidden=True)
 @click.argument("query_text")
@@ -1202,6 +1294,13 @@ def capabilities(install, agent, category):
         click.echo(r.text)
         return
 
+    remote = api_get("/v1/capabilities", require_auth=False)
+    if "error" not in remote:
+        if category:
+            remote["capabilities"] = [item for item in remote.get("capabilities", []) if item.get("category") == category]
+        output(remote, agent, False)
+        return
+
     commands = {
         "setup": [
             {"cmd": "init", "desc": "Generate API key", "credits": "Free"},
@@ -1217,6 +1316,7 @@ def capabilities(install, agent, category):
         "analysis": [
             {"cmd": "analyze", "desc": "AI forensic analysis for wallets and counterparties", "credits": "10"},
             {"cmd": "query", "desc": "Natural language wallet and stablecoin query", "credits": "10"},
+            {"cmd": "ask", "desc": "Plan an investigation workflow from a goal", "credits": "Free"},
             {"cmd": "capabilities", "desc": "List supported CLI capabilities", "credits": "Free"},
         ],
         "data": [
