@@ -1133,7 +1133,10 @@ def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, execut
     if "error" not in result and open_workspace:
         result = open_planned_workspace(result, address, goal)
     elif "error" not in result and execute_first_step:
-        result = execute_planned_first_step(result, address)
+        if result.get("executed_action", {}).get("result") is not None:
+            result = result["executed_action"]["result"]
+        else:
+            result = execute_planned_first_step(result, address)
     output(result, agent, quiet)
 
 
