@@ -66,8 +66,10 @@ def api_get(path, params=None, require_auth=True):
     try:
         headers = get_headers() if require_auth else {"Content-Type": "application/json"}
         r = httpx.get(f"{API_BASE}{path}", headers=headers, params=params, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        data = r.json() if r.text else {}
+        if r.status_code >= 400:
+            return format_api_error(r, data)
+        return data
     except Exception as e:
         return {"error": str(e)}
 
@@ -112,10 +114,35 @@ def api_post(path, body, require_auth=True):
     try:
         headers = get_headers() if require_auth else {"Content-Type": "application/json"}
         r = httpx.post(f"{API_BASE}{path}", headers=headers, json=body, timeout=60)
-        r.raise_for_status()
-        return r.json()
+        data = r.json() if r.text else {}
+        if r.status_code >= 400:
+            return format_api_error(r, data)
+        return data
     except Exception as e:
         return {"error": str(e)}
+
+
+def format_api_error(response, data):
+    status = response.status_code
+    payload = data if isinstance(data, dict) else {}
+    result = dict(payload)
+    result.setdefault("error", payload.get("detail") if isinstance(payload, dict) else response.text or f"HTTP {status}")
+    result["_http_status"] = status
+
+    if status == 402:
+        need = payload.get("error", "")
+        result["friendly_error"] = "This command requires available credits or x402 payment."
+        result["next_steps"] = [
+            "Buy credits: blockintql buy --email YOUR_EMAIL",
+            "Or enable x402 payment with: blockintql pay --auto-pay",
+        ]
+    elif status == 401:
+        result["friendly_error"] = "API key is missing, invalid, or expired."
+        result["next_steps"] = [
+            "Generate a key: blockintql init",
+            "Or save an existing key: blockintql auth --api-key YOUR_KEY",
+        ]
+    return result
 
 
 def enrich_with_provider(result, address, chain, provider_name, provider_key, provider_url):
@@ -156,12 +183,174 @@ def verdict_color(v):
     return {"CLEAR": "green", "CAUTION": "yellow", "BLOCK": "red"}.get(str(v).upper(), "white")
 
 
+def print_rule():
+    console.print(f"  [dim]{'─' * 52}[/dim]")
+
+
+def preview_addresses(addresses, limit=3):
+    items = [a for a in addresses if a]
+    if not items:
+        return "none"
+    shown = items[:limit]
+    if len(items) > limit:
+        shown.append(f"+{len(items) - limit} more")
+    return ", ".join(shown)
+
+
+def render_status(data):
+    console.print()
+    console.print("  [bold green]Account active[/bold green]")
+    print_rule()
+    console.print(f"  [dim]key      [/dim] {data.get('key_prefix', 'unknown')}")
+    console.print(f"  [dim]tier     [/dim] {data.get('tier', 'unknown')}")
+    console.print(f"  [dim]credits  [/dim] {data.get('credits', 0)}")
+    console.print(f"  [dim]name     [/dim] {data.get('display_name') or 'Not set'}")
+    console.print(f"  [dim]email    [/dim] {data.get('email') or 'Not set'}")
+    if data.get("created_at"):
+        console.print(f"  [dim]created  [/dim] {data['created_at']}")
+    print_rule()
+    if data.get("credits", 0) <= 0:
+        console.print("  [yellow]No available credits on this key[/yellow]")
+        console.print("  [dim]Next: blockintql buy --email YOUR_EMAIL[/dim]")
+        console.print("  [dim]Or use x402 per request: blockintql pay --auto-pay[/dim]")
+    else:
+        console.print("  [dim]Next: blockintql verdict <address>[/dim]")
+    console.print()
+
+
+def render_trace(data):
+    console.print()
+    console.print("  [bold cyan]Trace complete[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]txid     [/dim] {data.get('txid', '')}")
+    console.print(f"  [dim]method   [/dim] {data.get('method', 'FIFO')}")
+    console.print(f"  [dim]hops     [/dim] {data.get('hops_analyzed', 0)} analyzed / {data.get('transactions_traced', 0)} txs")
+    console.print(f"  [dim]outputs  [/dim] {data.get('traceable_outputs', 0)} traceable outputs")
+    if data.get("narrative"):
+        print_rule()
+        console.print(f"  [dim]{data['narrative']}[/dim]")
+
+    tx_summary = data.get("tx_summary") or {}
+    if tx_summary:
+        print_rule()
+        console.print("  [bold]Transaction Shape[/bold]")
+        console.print(f"  [dim]in/out   [/dim] {tx_summary.get('input_count', 0)} inputs · {tx_summary.get('output_count', 0)} outputs")
+        console.print(f"  [dim]btc      [/dim] {tx_summary.get('total_input_btc', 0)} in · {tx_summary.get('total_output_btc', 0)} out")
+        console.print(f"  [dim]fee      [/dim] {tx_summary.get('fee_btc', 0)} BTC")
+        console.print(f"  [dim]largest  [/dim] {tx_summary.get('largest_output_btc', 0)} BTC")
+        console.print(f"  [dim]inputs   [/dim] {preview_addresses(tx_summary.get('input_addresses', []))}")
+        console.print(f"  [dim]outputs  [/dim] {preview_addresses(tx_summary.get('output_addresses', []))}")
+
+    observations = data.get("observations") or []
+    if observations:
+        print_rule()
+        console.print("  [bold]Observations[/bold]")
+        for item in observations[:4]:
+            console.print(f"  [dim]• {item}[/dim]")
+
+    destinations = data.get("destinations") or []
+    if destinations:
+        print_rule()
+        console.print("  [bold]Resolved Destinations[/bold]")
+        for dest in destinations[:5]:
+            label = dest.get("entity") or dest.get("destination_type", "unknown")
+            console.print(f"  [dim]• {dest.get('amount_btc', 0)} BTC -> {label} (hop {dest.get('hop', '?')})[/dim]")
+
+    unresolved = data.get("unresolved_spends") or []
+    if unresolved:
+        print_rule()
+        console.print(f"  [bold]Unresolved Spends[/bold] [dim]({len(unresolved)})[/dim]")
+        for item in unresolved[:4]:
+            console.print(f"  [dim]• {item.get('amount_btc', 0)} BTC at {item.get('address', 'unknown')}[/dim]")
+
+    skipped = data.get("skipped") or []
+    if skipped:
+        print_rule()
+        console.print(f"  [bold]Skipped During Analysis[/bold] [dim]({len(skipped)})[/dim]")
+        for item in skipped[:3]:
+            console.print(f"  [dim]• {item.get('txid', '')} — {item.get('reason', 'unknown')}[/dim]")
+
+    print_rule()
+    console.print("  [dim]Next: blockintql report --address <address> --entity \"Observed Entity\" --category OTHER[/dim]")
+    console.print()
+
+
+def render_opreturn_search(data):
+    console.print()
+    count = data.get("results", 0)
+    title = "OP_RETURN matches found" if count else "No OP_RETURN matches found"
+    color = "green" if count else "yellow"
+    console.print(f"  [bold {color}]{title}[/bold {color}]")
+    print_rule()
+    console.print(f"  [dim]query    [/dim] {data.get('query') or '(none)'}")
+    console.print(f"  [dim]protocol [/dim] {data.get('protocol', 'all')}")
+    console.print(f"  [dim]results  [/dim] {count}")
+
+    summary = data.get("summary") or {}
+    top_protocols = summary.get("top_protocols") or []
+    if top_protocols:
+        top_summary = ", ".join(f"{row['protocol']} ({row['count']})" for row in top_protocols[:3])
+        console.print(f"  [dim]top      [/dim] {top_summary}")
+    if "identity_hit_count" in summary:
+        console.print(f"  [dim]identity [/dim] {summary.get('identity_hit_count', 0)} records")
+
+    rows = data.get("data") or []
+    if rows:
+        print_rule()
+        console.print("  [bold]Previews[/bold]")
+        for row in rows[:3]:
+            proto = row.get("protocol") or "unknown"
+            txid = row.get("tx_hash", "")[:12]
+            preview = row.get("preview") or row.get("decoded_text") or "(no preview)"
+            console.print(f"  [dim]• {proto} · {txid}…[/dim]")
+            console.print(f"    {preview}")
+
+    guidance = data.get("guidance") or {}
+    tips = guidance.get("tips") or []
+    if tips:
+        print_rule()
+        console.print("  [bold]Search Tips[/bold]")
+        for tip in tips[:3]:
+            console.print(f"  [dim]• {tip}[/dim]")
+
+    print_rule()
+    console.print("  [dim]Next: try a shorter keyword or add --protocol for a narrower search[/dim]")
+    console.print()
+
+
+def render_opreturn_tx(data):
+    console.print()
+    found = data.get("found", False)
+    console.print(f"  [bold {'green' if found else 'yellow'}]{'OP_RETURN data found' if found else 'No indexed OP_RETURN data found'}[/bold {'green' if found else 'yellow'}]")
+    print_rule()
+    console.print(f"  [dim]txid     [/dim] {data.get('tx_hash', '')}")
+    console.print(f"  [dim]results  [/dim] {data.get('results', 0)}")
+    rows = data.get("data") or []
+    for row in rows[:3]:
+        console.print(f"  [dim]protocol [/dim] {row.get('protocol') or 'unknown'}")
+        console.print(f"  [dim]preview  [/dim] {row.get('preview') or '(no preview)'}")
+    guidance = (data.get("guidance") or {}).get("tips") or []
+    if guidance:
+        print_rule()
+        for tip in guidance[:2]:
+            console.print(f"  [dim]• {tip}[/dim]")
+    console.print()
+
+
 def output(data, agent, quiet):
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps(data, indent=2, default=str))
         return
     if "error" in data:
-        err_console.print(f"  [red]✗[/red] {data['error']}")
+        err_console.print(f"  [red]✗[/red] {data.get('friendly_error') or data['error']}")
+        if data.get("error") and data.get("friendly_error") and data["friendly_error"] != data["error"]:
+            err_console.print(f"  [dim]{data['error']}[/dim]")
+        for step in data.get("next_steps", []):
+            err_console.print(f"  [dim]{step}[/dim]")
+        return
+
+    if "key_prefix" in data and "credits" in data and "tier" in data:
+        render_status(data)
         return
 
     if "verdict" in data and "risk_score" in data:
@@ -224,6 +413,18 @@ def output(data, agent, quiet):
         console.print(f"  [dim]{'─' * 52}[/dim]")
         console.print("  [dim]BlockINTQL · OP_RETURN identity graph · block6iq.com[/dim]")
         console.print()
+        return
+
+    if "tx_summary" in data and "transactions_traced" in data:
+        render_trace(data)
+        return
+
+    if "query" in data and "guidance" in data and "summary" in data and "data" in data:
+        render_opreturn_search(data)
+        return
+
+    if "tx_hash" in data and "found" in data and "guidance" in data:
+        render_opreturn_tx(data)
         return
 
     if not quiet:
@@ -344,18 +545,16 @@ def cli(ctx):
         console.print("    pay               Configure x402 USDC payments")
         console.print("    status            Check key & credit balance")
         console.print()
-        console.print("  [bold]INTELLIGENCE[/bold]  [dim](2 credits)[/dim]")
+        console.print("  [bold]INTELLIGENCE[/bold]")
         console.print("    verdict           Screen address — CLEAR / CAUTION / BLOCK")
         console.print("    screen            Full risk screening with narrative")
-        console.print("    profile           Identity profile lookup")
-        console.print("    trace             Follow transaction hops")
         console.print()
-        console.print("  [bold]ANALYSIS[/bold]  [dim](5-20 credits)[/dim]")
-        console.print("    analyze           AI-powered address analysis")
-        console.print("    query             Natural language blockchain query")
+        console.print("  [bold]ANALYSIS[/bold]")
+        console.print("    analyze           AI-powered wallet analysis")
+        console.print("    query             Natural language wallet and stablecoin query")
         console.print("    capabilities      List supported CLI capabilities")
         console.print()
-        console.print("  [bold]DATA[/bold]  [dim](1 credit)[/dim]")
+        console.print("  [bold]DATA[/bold]")
         console.print("    providers         List enrichment providers")
         console.print()
         console.print("  [bold]COMMUNITY[/bold]  [dim](free)[/dim]")
@@ -451,7 +650,7 @@ def analyze(query, address, chain, fmt, agent, quiet):
     output(result, agent, quiet)
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.argument("identifier")
 @click.option(
     "--type",
@@ -468,7 +667,7 @@ def profile(identifier, id_type, agent, quiet):
     output(result, agent, quiet)
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.option("--txid", "-t", required=True)
 @click.option("--hops", default=5)
 @click.option("--method", default="fifo", type=click.Choice(["fifo", "lifo"]))
@@ -568,17 +767,15 @@ def capabilities(install, agent, category):
             {"cmd": "auth", "desc": "Save existing API key", "credits": "Free"},
             {"cmd": "buy", "desc": "Purchase credits via Stripe", "credits": "Free"},
             {"cmd": "pay", "desc": "Configure local x402 payment preferences", "credits": "Free"},
-            {"cmd": "status", "desc": "Check account info and credits", "credits": "1"},
+            {"cmd": "status", "desc": "Check account info and credits", "credits": "Free"},
         ],
         "intelligence": [
             {"cmd": "verdict", "desc": "Address risk verdict (CLEAR/CAUTION/BLOCK)", "credits": "2"},
             {"cmd": "screen", "desc": "Full counterparty screening with flags", "credits": "2"},
-            {"cmd": "profile", "desc": "OP_RETURN identity search", "credits": "1"},
-            {"cmd": "trace", "desc": "Fund tracing with FIFO/LIFO", "credits": "2"},
         ],
         "analysis": [
-            {"cmd": "analyze", "desc": "5-agent AI forensic analysis", "credits": "10"},
-            {"cmd": "query", "desc": "Natural language blockchain query", "credits": "10"},
+            {"cmd": "analyze", "desc": "AI forensic analysis for wallets and counterparties", "credits": "10"},
+            {"cmd": "query", "desc": "Natural language wallet and stablecoin query", "credits": "10"},
             {"cmd": "capabilities", "desc": "List supported CLI capabilities", "credits": "Free"},
         ],
         "data": [
@@ -814,8 +1011,7 @@ def label_search(entity, category, address, agent):
     if address: params["address"] = address
     if not params:
         err_console.print("[red]Provide --entity, --category, or --address[/red]"); return
-    qs = "&".join(f"{k}={v}" for k,v in params.items())
-    result = api_get(f"/v1/labels/search?{qs}")
+    result = api_get("/v1/labels/search", params=params)
     output(result, agent, False)
 
 
