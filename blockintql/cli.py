@@ -11,13 +11,13 @@ Verify this by reading the source. Open source: github.com/block6iq/blockintql-c
 """
 
 import sys, os, json
+from pathlib import Path
 import click
 import httpx
-from typing import Optional
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
 from rich import box
+from . import __version__
 from .providers import get_provider, list_providers
 
 # ── BANNER ────────────────────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ BLOCKINTQL_BANNER = """
 [dim]  Sovereign Blockchain Intelligence · by Block6IQ · block6iq.com[/dim]
 """
 
-API_BASE = os.environ.get("BLOCKINTQL_API_URL", "https://btc-index-api-385334043904.us-central1.run.app")
+API_BASE = os.environ.get("BLOCKINTQL_API_URL", "https://blockintql.com")
 CONFIG_FILE = os.path.expanduser("~/.blockintql/config.json")
 console = Console()
 err_console = Console(stderr=True)
@@ -43,7 +43,9 @@ def load_config():
 
 def save_config(config):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, "w") as f: json.dump(config, f, indent=2)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+    Path(CONFIG_FILE).chmod(0o600)
 
 def get_api_key():
     return os.environ.get("BLOCKINTQL_API_KEY") or load_config().get("api_key")
@@ -55,35 +57,62 @@ def get_headers():
         sys.exit(1)
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
-def api_get(path, params=None):
+def api_get(path, params=None, require_auth=True):
     """Query BlockINTQL API — sends address+chain ONLY, never provider keys."""
     try:
-        r = httpx.get(f"{API_BASE}{path}", headers=get_headers(), params=params, timeout=30)
+        headers = get_headers() if require_auth else {"Content-Type": "application/json"}
+        r = httpx.get(f"{API_BASE}{path}", headers=headers, params=params, timeout=30)
         r.raise_for_status()
         return r.json()
     except Exception as e:
         return {"error": str(e)}
 
-def api_post(path, body):
+def api_post(path, body, require_auth=True):
     """Query BlockINTQL API — sends address+chain ONLY, never provider keys."""
     try:
-        r = httpx.post(f"{API_BASE}{path}", headers=get_headers(), json=body, timeout=60)
+        headers = get_headers() if require_auth else {"Content-Type": "application/json"}
+        r = httpx.post(f"{API_BASE}{path}", headers=headers, json=body, timeout=60)
         r.raise_for_status()
         return r.json()
     except Exception as e:
         return {"error": str(e)}
 
-def enrich_with_provider(result, address, chain, provider_name, provider_key):
+def create_workspace_from_plan(plan_result, quiet=False, agent=False):
+    """Create a workspace from a plan payload when the API recommends one."""
+    recommended = plan_result.get("recommended_workspace") or {}
+    payload = recommended.get("payload") or {}
+    if not payload:
+        return None
+    if not quiet and not agent:
+        console.print("[dim]Opening recommended workspace...[/]")
+    created = api_post("/v1/workspaces/create", payload, require_auth=True)
+    if "error" in created:
+        return {
+            "execution_error": {
+                "detail": created["error"],
+                "source": "workspace_create_fallback",
+            }
+        }
+    return {
+        "execution_mode": "created_workspace_from_plan",
+        "executed_workspace": created,
+        "workspace_created_from_plan": True,
+    }
+
+def enrich_with_provider(result, address, chain, provider_name, provider_key, provider_url):
     """
     PRIVACY: Runs entirely on your local machine.
     Calls provider API directly — key never sent to BlockINTQL.
     Only the merged verdict (no raw provider data) is shown to user.
     """
-    if not provider_name or not provider_key:
+    if not provider_name:
         return result
-    provider = get_provider(provider_name, provider_key)
+    provider = get_provider(provider_name, provider_key or "", url_template=provider_url)
     if not provider:
         err_console.print(f"[yellow]Unknown provider: {provider_name}[/]")
+        return result
+    if provider.requires_api_key and not provider_key:
+        err_console.print(f"[yellow]{provider_name} requires --provider-key or BLOCKINTQL_PROVIDER_KEY[/]")
         return result
 
     # PRIVACY: This call goes directly to provider API from your machine
@@ -182,13 +211,105 @@ def output(data, agent, quiet):
         console.print()
         return
 
+    # ── ACCOUNT / STATUS ──────────────────────────────────────────────────────
+    if "credits" in data and ("tier" in data or "key_prefix" in data):
+        console.print()
+        console.print("  [bold green]ACCOUNT OK[/bold green]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]key      [/dim] {data.get('key_prefix', 'Unknown')}")
+        console.print(f"  [dim]email    [/dim] {data.get('email') or 'Unknown'}")
+        console.print(f"  [dim]org      [/dim] {data.get('org') or 'Unknown'}")
+        console.print(f"  [dim]tier     [/dim] {data.get('tier') or 'Unknown'}")
+        console.print(f"  [dim]credits  [/dim] {data.get('credits', 0)}")
+        if data.get("display_name"):
+            console.print(f"  [dim]name     [/dim] {data['display_name']}")
+        if data.get("created_at"):
+            console.print(f"  [dim]created  [/dim] {data['created_at']}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]BlockINTQL · block6iq.com[/dim]")
+        console.print()
+        return
+
+    # ── PLAN / WORKSPACE ──────────────────────────────────────────────────────
+    if "recommended_surface" in data and "steps" in data:
+        console.print()
+        execution_mode = data.get("execution_mode", "plan_only")
+        console.print(f"  [bold cyan]{execution_mode.upper()}[/bold cyan]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]surface  [/dim] {data.get('recommended_surface', 'unknown')}")
+        console.print(f"  [dim]credits  [/dim] {data.get('estimated_total_credits', 0)}")
+        console.print(f"  [dim]usd      [/dim] ${data.get('estimated_total_usd', 0)}")
+        if data.get("summary"):
+            console.print(f"  [dim]summary  [/dim] {data['summary']}")
+        if data.get("executed_workspace"):
+            workspace = data["executed_workspace"]
+            console.print(f"  [dim]workspace[/dim] {workspace.get('workspace_id', 'queued')}")
+            console.print(f"  [dim]status   [/dim] {workspace.get('status', 'unknown')}")
+            if workspace.get("poll_url"):
+                console.print(f"  [dim]poll     [/dim] {workspace['poll_url']}")
+        elif data.get("recommended_workspace"):
+            workspace = data["recommended_workspace"]
+            console.print(f"  [dim]workspace[/dim] {workspace.get('name', 'recommended')}")
+            console.print(f"  [dim]modules  [/dim] {', '.join(workspace.get('modules', []))}")
+            if workspace.get("graph_step_capability_id"):
+                console.print(f"  [dim]graph    [/dim] {workspace.get('graph_step_capability_id')}")
+        steps = data.get("steps") or []
+        if steps:
+            console.print("  [dim]steps[/dim]")
+            for idx, step in enumerate(steps[:6], start=1):
+                title = step.get("title") or step.get("capability_id") or f"step-{idx}"
+                surface = step.get("surface") or "unknown"
+                optional = " optional" if step.get("optional") else ""
+                console.print(f"    {idx}. {title} [dim]({surface}{optional})[/dim]")
+        if data.get("execution_skipped"):
+            console.print(f"  [dim]next     [/dim] {data['execution_skipped'].get('next', '')}")
+        if data.get("execution_error"):
+            err = data["execution_error"]
+            console.print(f"  [red]error    [/red] {err.get('detail', err)}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]BlockINTQL · block6iq.com[/dim]")
+        console.print()
+        return
+
+    if "workspace_id" in data and "status" in data and "poll_url" in data:
+        console.print()
+        console.print("  [bold cyan]WORKSPACE[/bold cyan]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]id       [/dim] {data.get('workspace_id')}")
+        console.print(f"  [dim]name     [/dim] {data.get('name') or 'Unknown'}")
+        console.print(f"  [dim]chain    [/dim] {data.get('chain') or 'Unknown'}")
+        console.print(f"  [dim]status   [/dim] {data.get('status') or 'Unknown'}")
+        console.print(f"  [dim]provider [/dim] {data.get('provider') or 'Unknown'}")
+        if data.get("modules"):
+            console.print(f"  [dim]modules  [/dim] {', '.join(data.get('modules') or [])}")
+        if data.get("access_url"):
+            console.print(f"  [dim]access   [/dim] {data['access_url']}")
+        if data.get("graph_url"):
+            console.print(f"  [dim]graph    [/dim] {data['graph_url']}")
+        if data.get("search_url"):
+            console.print(f"  [dim]search   [/dim] {data['search_url']}")
+        if data.get("ssh"):
+            console.print(f"  [dim]ssh      [/dim] {data['ssh']}")
+        if data.get("poll_url"):
+            console.print(f"  [dim]poll     [/dim] {data['poll_url']}")
+        if data.get("destroy_url"):
+            console.print(f"  [dim]destroy  [/dim] {data['destroy_url']}")
+        if data.get("error_message"):
+            console.print(f"  [red]error    [/red] {data['error_message']}")
+        for note in data.get("notes") or []:
+            console.print(f"  [dim]note     [/dim] {note}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]BlockINTQL · block6iq.com[/dim]")
+        console.print()
+        return
+
     if not quiet:
         console.print_json(json.dumps(data, default=str))
 
 
 provider_opts = [
     click.option("--provider", "-p", default=None,
-                 type=click.Choice(["chainalysis","trm","elliptic","arkham","generic"]),
+                 type=click.Choice(["chainalysis","trm","elliptic","arkham","metamask","generic"]),
                  help="Attribution provider (key stays on your machine)"),
     click.option("--provider-key", default=None, envvar="BLOCKINTQL_PROVIDER_KEY",
                  help="Provider API key — never sent to BlockINTQL"),
@@ -201,7 +322,7 @@ def with_provider(f):
     return f
 
 @click.group(invoke_without_command=True)
-@click.version_option("1.0.1", prog_name="blockintql")
+@click.version_option(__version__, prog_name="blockintql")
 @click.pass_context
 def cli(ctx):
     """BlockINTQL — Sovereign Blockchain Intelligence CLI
@@ -216,15 +337,15 @@ def cli(ctx):
 @cli.command()
 @click.option("--api-key", required=True)
 @click.option("--provider", default=None)
-@click.option("--provider-key", default=None)
-def auth(api_key, provider, provider_key):
-    """Save API key and optional default provider."""
+def auth(api_key, provider):
+    """Save API key and optional default provider name."""
     config = load_config()
     config["api_key"] = api_key
-    if provider: config["default_provider"] = provider
-    if provider_key: config["default_provider_key"] = provider_key
+    if provider:
+        config["default_provider"] = provider
     save_config(config)
-    console.print("[green]✅ Saved.[/]")
+    console.print("[green]Saved API configuration.[/]")
+    console.print("[dim]Keep provider keys in environment variables instead of config files.[/]")
 
 @cli.command()
 @click.option("--address", "-a", required=True)
@@ -247,7 +368,6 @@ def verdict(address, chain, context, provider, provider_key, provider_url, agent
     """
     config = load_config()
     provider = provider or config.get("default_provider")
-    provider_key = provider_key or config.get("default_provider_key")
     if not quiet and not agent:
         p_info = f" + {provider} (local)" if provider else ""
         console.print(f"[dim]Screening {address[:20]}...{p_info}[/]")
@@ -256,8 +376,8 @@ def verdict(address, chain, context, provider, provider_key, provider_url, agent
     result = api_post("/v1/verdict", {"address": address, "chain": chain, "context": context})
 
     # STEP 2: Provider called directly from YOUR machine — key never sent to BlockINTQL
-    if provider and provider_key and "error" not in result:
-        result = enrich_with_provider(result, address, chain, provider, provider_key)
+    if provider and "error" not in result:
+        result = enrich_with_provider(result, address, chain, provider, provider_key, provider_url)
 
     output(result, agent, quiet)
 
@@ -281,7 +401,6 @@ def screen(address, chain, provider, provider_key, provider_url, agent, quiet):
     """
     config = load_config()
     provider = provider or config.get("default_provider")
-    provider_key = provider_key or config.get("default_provider_key")
     if not quiet and not agent:
         p_info = f" + {provider} (local)" if provider else ""
         console.print(f"[dim]Screening {address[:20]}...{p_info}[/]")
@@ -290,8 +409,8 @@ def screen(address, chain, provider, provider_key, provider_url, agent, quiet):
     result = api_post("/v1/screen", {"address": address, "chain": chain})
 
     # STEP 2: Provider called directly from YOUR machine — key never sent to BlockINTQL
-    if provider and provider_key and "error" not in result:
-        result = enrich_with_provider(result, address, chain, provider, provider_key)
+    if provider and "error" not in result:
+        result = enrich_with_provider(result, address, chain, provider, provider_key, provider_url)
 
     output(result, agent, quiet)
 
@@ -350,6 +469,51 @@ def query(query, agent, quiet):
     output(result, agent, quiet)
 
 @cli.command()
+@click.argument("goal")
+@click.option("--address", "-a", default=None)
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin","ethereum"]))
+@click.option("--budget-credits", type=int, default=None)
+@click.option("--budget-usd", type=float, default=None)
+@click.option("--upto-budget-usd", type=float, default=None)
+@click.option("--open-workspace", is_flag=True, help="Prefer workspace execution and open a workspace when possible.")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def ask(goal, address, chain, budget_credits, budget_usd, upto_budget_usd, open_workspace, agent, quiet):
+    """Plan an investigation and optionally open a workspace."""
+    if not quiet and not agent:
+        console.print("[dim]Planning investigation...[/]")
+
+    body = {
+        "goal": goal,
+        "chain": chain,
+    }
+    if address:
+        body["address"] = address
+    if budget_credits is not None:
+        body["budget_credits"] = budget_credits
+    if budget_usd is not None:
+        body["budget_usd"] = budget_usd
+    if upto_budget_usd is not None:
+        body["upto_budget_usd"] = upto_budget_usd
+    if open_workspace:
+        body["prefer_surface"] = "workspace"
+        body["execute_workspace"] = True
+
+    result = api_post("/v1/plan", body, require_auth=bool(open_workspace))
+
+    if (
+        open_workspace
+        and "error" not in result
+        and not result.get("executed_workspace")
+        and result.get("recommended_workspace", {}).get("payload")
+    ):
+        fallback = create_workspace_from_plan(result, quiet=quiet, agent=agent)
+        if fallback:
+            result.update(fallback)
+
+    output(result, agent, quiet)
+
+@cli.command()
 @click.option("--agent", is_flag=True)
 def providers(agent):
     """List attribution providers — all called locally, keys never leave your machine."""
@@ -377,7 +541,7 @@ def skills(install, agent):
         return
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps({
-            "commands": ["verdict","screen","analyze","profile","trace","query","providers"],
+            "commands": ["verdict","screen","analyze","profile","trace","query","ask","providers","status"],
             "providers": [p["name"] for p in list_providers()],
             "privacy": "Provider keys never leave your machine",
             "mcp_server": "https://blockintql-mcp-385334043904.us-central1.run.app/mcp",
@@ -395,6 +559,7 @@ def skills(install, agent):
         ("profile","OP_RETURN identity","blockintql profile --identifier @handle"),
         ("trace","FIFO/LIFO tracing","blockintql trace --txid abc123..."),
         ("query","Natural language",'blockintql query "is this safe?"'),
+        ("ask","Plan or open workspace",'blockintql ask "Investigate this wallet" --address 0x123...'),
         ("providers","List providers","blockintql providers"),
         ("skills","Agent skills","blockintql skills --install >> CONTEXT.md"),
     ]
@@ -411,49 +576,51 @@ def skills(install, agent):
 @click.option("--auto-pay", is_flag=True)
 @click.option("--max-payment", default=0.10)
 def pay(wallet_type, cdp_key_id, cdp_private_key, private_key, auto_pay, max_payment):
-    """Configure x402 auto-payment — $0.001 USDC per screen on Base."""
+    """Store local payment preferences for wallet-based billing flows."""
     config = load_config()
     payment_config = {"type": wallet_type, "auto_pay": auto_pay, "max_payment_usd": max_payment}
     if wallet_type == "cdp":
-        if not cdp_key_id or not cdp_private_key:
-            err_console.print("[red]CDP requires --cdp-key-id and --cdp-private-key[/]")
-            return
-        payment_config.update({"cdp_key_id": cdp_key_id, "cdp_private_key": cdp_private_key})
+        payment_config["cdp_key_id"] = cdp_key_id or os.environ.get("BLOCKINTQL_CDP_KEY_ID")
     elif wallet_type == "privatekey":
-        if not private_key:
-            err_console.print("[red]Requires --private-key[/]")
-            return
-        payment_config["private_key"] = private_key
+        payment_config["private_key_env"] = "BLOCKINTQL_PRIVATE_KEY"
     config["payment"] = payment_config
     save_config(config)
-    console.print(f"[green]✅ Payment wallet configured ({wallet_type})[/]")
-    console.print(f"[green]✅ Auto-pay: {'enabled' if auto_pay else 'disabled'} | Max: ${max_payment}[/]")
-    console.print(f"[dim]Payments → 0x32984663A11b9d7634Bf35835AE32B5A031637D5 (Base)[/]")
+    console.print(f"[green]Saved local payment preferences ({wallet_type}).[/]")
+    console.print(f"[green]Auto-pay preference: {'enabled' if auto_pay else 'disabled'} | Max: ${max_payment}[/]")
+    console.print("[dim]Sensitive wallet keys are not persisted by this command. Keep them in environment variables.[/]")
 
 @cli.command()
 @click.option("--agent", is_flag=True)
 def status(agent):
-    """Check node health."""
-    output(api_get("/health"), agent, False)
+    """Check authenticated account status."""
+    output(api_get("/v1/me"), agent, False)
 
 
 @cli.command()
-@click.option("--email", "-e", required=True, help="Email to receive your API key")
+@click.option("--email", "-e", default="", help="Optional email for Stripe receipt / fallback delivery")
 @click.option("--pack", default="starter", type=click.Choice(["starter","pro"]),
               help="starter=$10/1000 screens · pro=$40/5000 screens")
 @click.option("--agent", is_flag=True)
 def buy(email, pack, agent):
     """
-    Buy a credit pack and receive an API key by email.
+    Buy a credit pack and top up your current API key.
 
     \b
     Examples:
-      blockintql buy --email you@example.com
-      blockintql buy --email you@example.com --pack pro
+      blockintql buy
+      blockintql buy --pack pro
+      blockintql buy --pack pro --email you@example.com
     """
     import webbrowser
-    console.print(f"[dim]Creating checkout for {email}...[/]")
-    result = api_post("/v1/billing/checkout", {"email": email, "pack": pack}, require_auth=False)
+    if not agent:
+        console.print("[dim]Creating checkout...[/]")
+    body = {"pack": pack}
+    if email:
+        body["email"] = email
+    api_key = get_api_key()
+    if api_key:
+        body["api_key"] = api_key
+    result = api_post("/v1/billing/checkout", body, require_auth=False)
     if "error" in result and not result.get("free_tier_exhausted"):
         err_console.print(f"  [red]✗[/red] {result['error']}")
         return
@@ -462,18 +629,99 @@ def buy(email, pack, agent):
         err_console.print("[red]Could not create checkout session[/]")
         return
     if agent or not sys.stdout.isatty():
-        click.echo(json.dumps({"checkout_url": checkout_url, "pack": pack, "email": email}, indent=2))
+        click.echo(json.dumps({"checkout_url": checkout_url, "pack": pack, "email": email or None, "api_key_attached": bool(api_key)}, indent=2))
         return
     console.print(f"  [dim]Pack:[/dim]  {'$10 — 1,000 screens' if pack == 'starter' else '$40 — 5,000 screens'}")
-    console.print(f"  [dim]Email:[/dim] {email}")
+    console.print(f"  [dim]Email:[/dim] {email or 'Not provided'}")
+    console.print(f"  [dim]Target:[/dim] {'Current API key' if api_key else 'No API key attached'}")
     console.print(f"  [dim]URL:[/dim]   {checkout_url}")
     console.print()
     try:
         webbrowser.open(checkout_url)
-        console.print("[dim]Browser opened. Complete payment to receive your API key.[/]")
+        console.print("[dim]Browser opened. Complete payment to add credits.[/]")
     except:
         console.print("[dim]Copy the URL above to complete payment.[/]")
-    console.print(f"[dim]After payment run:[/dim] blockintql auth --api-key biq_sk_live_...")
+    console.print("[dim]After payment run:[/dim] blockintql status")
+
+
+@cli.group()
+def workspace():
+    """Manage investigation workspaces."""
+
+
+@workspace.command("create")
+@click.argument("name")
+@click.option("--chain", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--modules", default="verdict,stablecoins,bridge-activity,chart")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_create(name, chain, modules, agent, quiet):
+    """Create a provisioned investigation workspace."""
+    module_list = [item.strip() for item in modules.split(",") if item.strip()]
+    payload = {"name": name, "chain": chain, "modules": module_list}
+    if not quiet and not agent:
+        console.print("[dim]Creating workspace...[/]")
+    output(api_post("/v1/workspaces/create", payload, require_auth=True), agent, quiet)
+
+
+@workspace.command("status")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_status(workspace_id, agent, quiet):
+    """Get workspace status."""
+    output(api_get(f"/v1/workspaces/{workspace_id}", require_auth=True), agent, quiet)
+
+
+@workspace.command("destroy")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_destroy(workspace_id, agent, quiet):
+    """Destroy a workspace."""
+    if not quiet and not agent:
+        console.print("[dim]Destroying workspace...[/]")
+    output(api_post(f"/v1/workspaces/{workspace_id}/destroy", {}, require_auth=True), agent, quiet)
+
+
+@workspace.command("open")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_open(workspace_id, agent, quiet):
+    """Open the workspace explorer if it is ready."""
+    import webbrowser
+
+    data = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    workspace = data.get("workspace", data) if isinstance(data, dict) else data
+    output(workspace, agent, quiet)
+    if agent or quiet or not sys.stdout.isatty():
+        return
+    runtime = data.get("runtime", {}) if isinstance(data, dict) else {}
+    entrypoints = runtime.get("entrypoints", {}) if isinstance(runtime, dict) else {}
+    capabilities = data.get("capabilities", {}) if isinstance(data, dict) else {}
+    url = (
+        entrypoints.get("explorer_url")
+        if capabilities.get("graph_explorer")
+        else None
+    ) or entrypoints.get("graph_url") or workspace.get("graph_url") or workspace.get("access_url")
+    if not url:
+        console.print("[yellow]Workspace is not ready to open yet.[/]")
+        return
+    try:
+        webbrowser.open(url)
+        console.print("[dim]Browser opened to workspace explorer.[/]")
+    except Exception:
+        console.print(f"[dim]Open this URL manually:[/] {url}")
+
+
+@workspace.command("manifest")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_manifest(workspace_id, agent, quiet):
+    """Fetch the full workspace manifest used by the provisioned explorer."""
+    output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
 
 
 def main():
