@@ -142,7 +142,7 @@ def format_api_error(response, data):
         need = payload.get("error", "")
         result["friendly_error"] = "This command requires available credits or x402 payment."
         result["next_steps"] = [
-            "Buy credits: blockintql buy --email YOUR_EMAIL",
+            "Buy credits: blockintql buy",
             "Or enable x402 payment with: blockintql pay --auto-pay",
         ]
     elif status == 401:
@@ -499,6 +499,78 @@ def recommended_workspace_payload(workspace):
     }
 
 
+def summarize_action_hint(action):
+    if not isinstance(action, dict):
+        return None
+    hints = []
+    if action.get("target_panel"):
+        hints.append(f"opens {action['target_panel']}")
+    if action.get("target_query_type"):
+        hints.append(f"queues {action['target_query_type']}")
+    if action.get("preferred_focus"):
+        hints.append(f"focus {action['preferred_focus']}")
+    if action.get("auto_chain_safe"):
+        hints.append("safe chain")
+    return " · ".join(hints) if hints else None
+
+
+def workspace_brief_payload(manifest, fallback_workspace_id=None):
+    workspace = manifest.get("workspace") or {}
+    context = manifest.get("context") or {}
+    brief = context.get("investigation_brief") or {}
+    seed = context.get("seed") or {}
+    return {
+        "workspace_id": workspace.get("workspace_id") or fallback_workspace_id,
+        "name": workspace.get("name"),
+        "status": workspace.get("status"),
+        "investigation_brief": {
+            "goal": brief.get("goal") or seed.get("goal"),
+            "seed_address": brief.get("seed_address") or seed.get("address"),
+            "recommended_actions": brief.get("recommended_actions") or [],
+        },
+    }
+
+
+def extract_workspace_ask_history(payload):
+    candidates = [
+        payload.get("saved_state"),
+        payload.get("workspace_state"),
+        payload.get("state"),
+        (payload.get("workspace") or {}).get("saved_state") if isinstance(payload.get("workspace"), dict) else None,
+        payload.get("context"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict) and isinstance(candidate.get("ask_history"), list):
+            return candidate.get("ask_history") or []
+    return []
+
+
+def workspace_conversation_payload(manifest, fallback_workspace_id=None, limit=None):
+    workspace = manifest.get("workspace") or {}
+    thread = extract_workspace_ask_history(manifest)
+    if limit is not None:
+        thread = thread[-max(limit, 0):]
+    return {
+        "workspace_id": workspace.get("workspace_id") or fallback_workspace_id,
+        "name": workspace.get("name"),
+        "status": workspace.get("status"),
+        "workspace_conversation": thread,
+    }
+
+
+def workspace_review_payload(manifest, fallback_workspace_id=None, limit=None):
+    workspace = manifest.get("workspace") or {}
+    review = workspace_brief_payload(manifest, fallback_workspace_id=fallback_workspace_id)
+    review["workspace_conversation"] = workspace_conversation_payload(
+        manifest,
+        fallback_workspace_id=fallback_workspace_id,
+        limit=limit,
+    ).get("workspace_conversation", [])
+    review["activity"] = workspace.get("activity") or {}
+    review["workspace_context"] = workspace.get("workspace_context") or {}
+    return review
+
+
 def _with_query_params(url, params):
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -558,7 +630,7 @@ def render_status(data):
     print_rule()
     if data.get("credits", 0) <= 0:
         console.print("  [yellow]No available credits on this key[/yellow]")
-        console.print("  [dim]Next: blockintql buy --email YOUR_EMAIL[/dim]")
+        console.print("  [dim]Next: blockintql buy[/dim]")
         console.print("  [dim]Or use x402 per request: blockintql pay --auto-pay[/dim]")
     else:
         console.print("  [dim]Next: blockintql verdict <address>[/dim]")
@@ -920,6 +992,127 @@ def render_workspace_status(data):
     console.print()
 
 
+def render_workspace_conversation(data):
+    console.print()
+
+
+def render_workspace_review(data):
+    console.print()
+    console.print("  [bold cyan]Workspace Review[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]id       [/dim] {data.get('workspace_id', '')}")
+    console.print(f"  [dim]name     [/dim] {data.get('name') or 'Unknown'}")
+    console.print(f"  [dim]status   [/dim] {data.get('status') or 'Unknown'}")
+    activity = data.get("activity") or {}
+    if activity:
+        console.print(
+            f"  [dim]activity [/dim] "
+            f"score={activity.get('activity_score', 0)} · "
+            f"asks={activity.get('ask_count', 0)} · "
+            f"notes={activity.get('notes_count', 0)} · "
+            f"pins={activity.get('pin_count', 0)} · "
+            f"artifacts={activity.get('artifact_count', 0)}"
+        )
+        if activity.get("last_meaningful_at"):
+            detail = activity.get("last_meaningful_detail") or activity.get("last_meaningful_source") or "workspace_activity"
+            console.print(f"  [dim]last     [/dim] {activity.get('last_meaningful_at')} ({detail})")
+    brief = data.get("investigation_brief") or {}
+    if brief.get("goal"):
+        console.print(f"  [dim]goal     [/dim] {brief.get('goal')}")
+    if brief.get("seed_address"):
+        console.print(f"  [dim]seed     [/dim] {brief.get('seed_address')}")
+    actions = brief.get("recommended_actions") or []
+    if actions:
+        print_rule()
+        console.print("  [bold]Recommended next actions[/bold]")
+        for action in actions[:3]:
+            if isinstance(action, dict):
+                title = action.get("title") or action.get("id") or "action"
+                line = f"  [dim]•[/dim] {title}"
+                if action.get("surface"):
+                    line += f" [dim]({action.get('surface')})[/dim]"
+                console.print(line)
+                if action.get("description"):
+                    console.print(f"    [dim]{action.get('description')}[/dim]")
+                hint = summarize_action_hint(action)
+                if hint:
+                    console.print(f"    [dim]{hint}[/dim]")
+            else:
+                console.print(f"  [dim]•[/dim] {action}")
+    thread = data.get("workspace_conversation") or []
+    if thread:
+        print_rule()
+        console.print("  [bold]Recent conversation[/bold]")
+        for item in thread[-3:]:
+            console.print(f"  [dim]•[/dim] {item.get('goal') or '(no goal)'}")
+            reply = item.get("planner_reply") or {}
+            if reply.get("summary"):
+                console.print(f"    [dim]{reply.get('summary')}[/dim]")
+            outcomes = item.get("execution_outcomes") or ([] if not item.get("execution_outcome") else [item.get("execution_outcome")])
+            if outcomes:
+                latest = outcomes[-1]
+                if isinstance(latest, dict):
+                    detail = latest.get("detail") or latest.get("label") or latest.get("type") or "outcome"
+                    console.print(f"    [dim]latest: {detail}[/dim]")
+    console.print()
+    console.print("  [bold cyan]Workspace Conversation[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]id       [/dim] {data.get('workspace_id', '')}")
+    console.print(f"  [dim]name     [/dim] {data.get('name') or 'Unknown'}")
+    console.print(f"  [dim]status   [/dim] {data.get('status') or 'Unknown'}")
+    thread = data.get("workspace_conversation") or []
+    if not thread:
+        print_rule()
+        console.print("  [yellow]No saved asks in this workspace yet[/yellow]")
+        console.print()
+        return
+    for item in thread[-5:]:
+        print_rule()
+        console.print(f"  [bold]User Ask[/bold] [dim]{item.get('asked_at', '')}[/dim]")
+        console.print(f"  {item.get('goal') or '(no goal)'}")
+        if item.get("address"):
+            console.print(f"  [dim]seed     [/dim] {item.get('address')}")
+        if item.get("chain"):
+            console.print(f"  [dim]chain    [/dim] {item.get('chain')}")
+        reply = item.get("planner_reply") or {}
+        if reply:
+            console.print("  [bold]Planner Reply[/bold]")
+            if reply.get("summary"):
+                console.print(f"  [dim]summary  [/dim] {reply.get('summary')}")
+            if reply.get("mode"):
+                console.print(f"  [dim]mode     [/dim] {reply.get('mode')}")
+            if reply.get("recommended_surface"):
+                console.print(f"  [dim]surface  [/dim] {reply.get('recommended_surface')}")
+            if reply.get("estimated_total_credits") is not None:
+                line = f"  [dim]estimate [/dim] {reply.get('estimated_total_credits')} credits"
+                if reply.get("estimated_total_usd") is not None:
+                    line += f" · ${reply.get('estimated_total_usd')}"
+                console.print(line)
+            for action in (reply.get("recommended_actions") or [])[:3]:
+                if isinstance(action, dict):
+                    title = action.get("title") or action.get("id") or "action"
+                    console.print(f"  [dim]•[/dim] {title}")
+                    hint = summarize_action_hint(action)
+                    if hint:
+                        console.print(f"    [dim]{hint}[/dim]")
+                else:
+                    console.print(f"  [dim]•[/dim] {action}")
+        outcomes = item.get("execution_outcomes") or ([] if not item.get("execution_outcome") else [item.get("execution_outcome")])
+        if outcomes:
+            console.print("  [bold]Outcomes[/bold]")
+            for outcome in outcomes[-3:]:
+                if not isinstance(outcome, dict):
+                    continue
+                label = outcome.get("label") or outcome.get("type") or "outcome"
+                detail = outcome.get("detail") or ""
+                status = outcome.get("status")
+                status_text = f" [dim]({status})[/dim]" if status else ""
+                console.print(f"  [dim]•[/dim] {label}{status_text}")
+                if detail:
+                    console.print(f"    [dim]{detail}[/dim]")
+    console.print()
+
+
 def render_capability_catalog(data):
     console.print()
     console.print("  [bold cyan]Capabilities[/bold cyan]")
@@ -967,6 +1160,19 @@ def render_plan(data):
     if data.get("summary"):
         print_rule()
         console.print(f"  [dim]{data['summary']}[/dim]")
+    brief = data.get("investigation_brief") or {}
+    if brief.get("goal") and brief.get("goal") != data.get("goal"):
+        console.print(f"  [dim]brief    [/dim] {brief.get('goal')}")
+    if brief.get("seed_address") and brief.get("seed_address") != data.get("address"):
+        console.print(f"  [dim]seed     [/dim] {brief.get('seed_address')}")
+    if data.get("workspace_context_applied"):
+        context = data.get("workspace_context_summary") or {}
+        console.print(f"  [dim]case     [/dim] {context.get('workspace_name') or context.get('workspace_id') or 'workspace'}")
+        if context.get("last_meaningful_detail"):
+            console.print(f"  [dim]context  [/dim] {context.get('last_meaningful_detail')}")
+        recent_goals = context.get("recent_goals") or []
+        if recent_goals:
+            console.print(f"  [dim]memory   [/dim] {recent_goals[0]}")
     steps = data.get("steps") or []
     if steps:
         print_rule()
@@ -982,12 +1188,47 @@ def render_plan(data):
     first_step = data.get("first_executable_step")
     workspace = data.get("recommended_workspace")
     execution_skipped = data.get("execution_skipped")
+    execution_profiles = data.get("execution_profiles") or []
+    recommended_actions = brief.get("recommended_actions") or []
+    guardrails = data.get("cost_guardrails") or {}
     if first_step or workspace:
         print_rule()
     if first_step:
         console.print(f"  [dim]first executable:[/dim] {first_step.get('title', first_step.get('capability_id', ''))}")
     if workspace:
         console.print(f"  [dim]workspace:[/dim] {workspace.get('name')} [{', '.join(workspace.get('modules', []))}]")
+    if execution_profiles:
+        print_rule()
+        console.print("  [bold]Execution modes[/bold]")
+        for profile in execution_profiles[:3]:
+            label = profile.get("label") or profile.get("id") or "mode"
+            credits = profile.get("estimated_credits", 0)
+            usd = profile.get("estimated_usd")
+            suffix = f" · ${usd}" if usd is not None else ""
+            console.print(f"  [dim]• {label}[/dim] {credits} credits{suffix}")
+            if profile.get("description"):
+                console.print(f"    [dim]{profile.get('description')}[/dim]")
+    if recommended_actions:
+        print_rule()
+        console.print("  [bold]Recommended next actions[/bold]")
+        for action in recommended_actions[:3]:
+            if isinstance(action, dict):
+                title = action.get("title") or action.get("id") or "action"
+                surface = action.get("surface")
+                line = f"  [dim]•[/dim] {title}"
+                if surface:
+                    line += f" [dim]({surface})[/dim]"
+                console.print(line)
+                if action.get("description"):
+                    console.print(f"    [dim]{action.get('description')}[/dim]")
+                hint = summarize_action_hint(action)
+                if hint:
+                    console.print(f"    [dim]{hint}[/dim]")
+            else:
+                console.print(f"  [dim]•[/dim] {action}")
+    if guardrails.get("message"):
+        print_rule()
+        console.print(f"  [dim]guardrail[/dim] {guardrails.get('message')}")
     if execution_skipped:
         print_rule()
         console.print(f"  [yellow]execution skipped[/yellow] [dim]· {execution_skipped.get('reason', '')}[/dim]")
@@ -1196,6 +1437,14 @@ def output(data, agent, quiet):
 
     if "workspace_id" in data and "modules" in data and "status" in data:
         render_workspace_status(data)
+        return
+
+    if "investigation_brief" in data and "workspace_conversation" in data and "activity" in data:
+        render_workspace_review(data)
+        return
+
+    if "workspace_conversation" in data:
+        render_workspace_conversation(data)
         return
 
     if "capabilities" in data and "surfaces" in data:
@@ -1905,7 +2154,11 @@ def workspace_chat(workspace_id, goal, address, chain, budget_credits, budget_us
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_next(workspace_id, agent, quiet):
-    output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
+    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in manifest:
+        output(manifest, agent, quiet)
+        return
+    output(workspace_brief_payload(manifest, fallback_workspace_id=workspace_id), agent, quiet)
 
 
 @workspace.command("brief")
@@ -1913,7 +2166,11 @@ def workspace_next(workspace_id, agent, quiet):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_brief(workspace_id, agent, quiet):
-    output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
+    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in manifest:
+        output(manifest, agent, quiet)
+        return
+    output(workspace_brief_payload(manifest, fallback_workspace_id=workspace_id), agent, quiet)
 
 
 @workspace.command("manifest")
@@ -1922,6 +2179,68 @@ def workspace_brief(workspace_id, agent, quiet):
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_manifest(workspace_id, agent, quiet):
     output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
+
+
+@workspace.command("conversation")
+@click.argument("workspace_id")
+@click.option("--limit", default=5, type=int, show_default=True, help="How many recent conversation turns to show.")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_conversation(workspace_id, limit, agent, quiet):
+    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in manifest:
+        output(manifest, agent, quiet)
+        return
+    output(
+        workspace_conversation_payload(
+            manifest,
+            fallback_workspace_id=workspace_id,
+            limit=limit,
+        ),
+        agent,
+        quiet,
+    )
+
+
+@workspace.command("review")
+@click.argument("workspace_id")
+@click.option("--limit", default=3, type=int, show_default=True, help="How many recent conversation turns to include.")
+@click.option("--open-workspace", is_flag=True, help="Open the workspace explorer after showing the review summary.")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_review(workspace_id, limit, open_workspace, agent, quiet):
+    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in manifest:
+        output(manifest, agent, quiet)
+        return
+    output(
+        workspace_review_payload(
+            manifest,
+            fallback_workspace_id=workspace_id,
+            limit=limit,
+        ),
+        agent,
+        quiet,
+    )
+    if agent or quiet or not open_workspace or not sys.stdout.isatty():
+        return
+    review = workspace_review_payload(
+        manifest,
+        fallback_workspace_id=workspace_id,
+        limit=limit,
+    )
+    goal = ((review.get("investigation_brief") or {}).get("goal")) or "Reviewing active workspace state."
+    open_result = open_workspace_in_browser(
+        workspace_id,
+        resume_reason=f"Reopened from workspace review. {goal}",
+        resume_source="workspace_review",
+    )
+    if open_result is None:
+        console.print("[dim]Browser opened to workspace explorer.[/]")
+    elif str(open_result).startswith("http"):
+        console.print(f"[dim]Open this URL manually:[/] {open_result}")
+    else:
+        console.print(f"[yellow]{open_result}[/]")
 
 
 @cli.command()
@@ -2044,16 +2363,19 @@ def status(agent):
 
 
 @cli.command()
-@click.option("--email", "-e", required=True, help="Email to receive your API key")
+@click.option("--email", "-e", default="", help="Optional email for Stripe receipt / fallback delivery")
 @click.option("--pack", default="starter", type=click.Choice(["starter", "pro"]))
 @click.option("--agent", is_flag=True)
 def buy(email, pack, agent):
     import webbrowser
 
     if not agent:
-        console.print(f"[dim]Creating checkout for {email}...[/]")
+        console.print("[dim]Creating checkout...[/]")
     existing_key = get_api_key() or ""
-    result = api_post("/v1/billing/checkout", {"email": email, "pack": pack, "api_key": existing_key}, require_auth=False)
+    body = {"pack": pack, "api_key": existing_key}
+    if email:
+        body["email"] = email
+    result = api_post("/v1/billing/checkout", body, require_auth=False)
     if "error" in result and not result.get("free_tier_exhausted"):
         err_console.print(f"  [red]✗[/red] {result['error']}")
         return
@@ -2062,15 +2384,15 @@ def buy(email, pack, agent):
         err_console.print("[red]Could not create checkout session[/]")
         return
     if agent or not sys.stdout.isatty():
-        click.echo(json.dumps({"checkout_url": checkout_url, "pack": pack, "email": email}, indent=2))
+        click.echo(json.dumps({"checkout_url": checkout_url, "pack": pack, "email": email or None}, indent=2))
         return
     console.print(f"  [dim]Pack:[/dim]  {'$10 — 1,000 screens' if pack == 'starter' else '$40 — 5,000 screens'}")
-    console.print(f"  [dim]Email:[/dim] {email}")
+    console.print(f"  [dim]Email:[/dim] {email or 'Not provided'}")
     console.print(f"  [dim]URL:[/dim]   {checkout_url}")
     console.print()
     try:
         webbrowser.open(checkout_url)
-        console.print("[dim]Browser opened. Complete payment to receive your API key.[/]")
+        console.print("[dim]Browser opened. Complete payment to add credits.[/]")
     except Exception:
         console.print("[dim]Copy the URL above to complete payment.[/]")
     console.print("[dim]Credits will be added to your existing key automatically.[/]")
@@ -2114,7 +2436,7 @@ def init(agent):
     console.print(f"  [dim]credits[/dim] 0 — buy credits to start")
     console.print(f"  [dim]{'─' * 50}[/dim]")
     console.print(f"  [dim]Need more?[/dim]")
-    console.print(f"  blockintql buy --email YOUR_EMAIL")
+    console.print("  blockintql buy")
     console.print(f"  blockintql pay --auto-pay [dim](agents — USDC on Base)[/dim]")
     console.print()
 

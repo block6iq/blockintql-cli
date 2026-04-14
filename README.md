@@ -94,6 +94,23 @@ blockintql verdict --address 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa \
 # Natural language intelligence
 blockintql query "is this address linked to Lazarus Group?"
 
+# Plan an investigation and open a recommended workspace
+blockintql ask "Open a deeper stablecoin investigation workspace for this wallet" \
+  --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 \
+  --budget-credits 12 \
+  --open-workspace
+
+# Review the current state of an investigation workspace
+blockintql workspace review <workspace_id>
+
+# Inspect the recent ask / planner / outcome thread
+blockintql workspace conversation <workspace_id> --limit 5
+
+# Continue the same case with a follow-up ask
+blockintql workspace chat <workspace_id> \
+  "Go deeper on counterparties and bridge exposure" \
+  --open-workspace
+
 # Multi-address analysis
 blockintql analyze "check if these wallets transacted with each other" \
   --address 0x123... \
