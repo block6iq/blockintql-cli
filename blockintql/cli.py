@@ -2205,9 +2205,10 @@ def workspace_conversation(workspace_id, limit, agent, quiet):
 @workspace.command("review")
 @click.argument("workspace_id")
 @click.option("--limit", default=3, type=int, show_default=True, help="How many recent conversation turns to include.")
+@click.option("--open-workspace", is_flag=True, help="Open the workspace explorer after showing the review summary.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-def workspace_review(workspace_id, limit, agent, quiet):
+def workspace_review(workspace_id, limit, open_workspace, agent, quiet):
     manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
     if "error" in manifest:
         output(manifest, agent, quiet)
@@ -2221,6 +2222,25 @@ def workspace_review(workspace_id, limit, agent, quiet):
         agent,
         quiet,
     )
+    if agent or quiet or not open_workspace or not sys.stdout.isatty():
+        return
+    review = workspace_review_payload(
+        manifest,
+        fallback_workspace_id=workspace_id,
+        limit=limit,
+    )
+    goal = ((review.get("investigation_brief") or {}).get("goal")) or "Reviewing active workspace state."
+    open_result = open_workspace_in_browser(
+        workspace_id,
+        resume_reason=f"Reopened from workspace review. {goal}",
+        resume_source="workspace_review",
+    )
+    if open_result is None:
+        console.print("[dim]Browser opened to workspace explorer.[/]")
+    elif str(open_result).startswith("http"):
+        console.print(f"[dim]Open this URL manually:[/] {open_result}")
+    else:
+        console.print(f"[yellow]{open_result}[/]")
 
 
 @cli.command()
