@@ -558,6 +558,19 @@ def workspace_conversation_payload(manifest, fallback_workspace_id=None, limit=N
     }
 
 
+def workspace_review_payload(manifest, fallback_workspace_id=None, limit=None):
+    workspace = manifest.get("workspace") or {}
+    review = workspace_brief_payload(manifest, fallback_workspace_id=fallback_workspace_id)
+    review["workspace_conversation"] = workspace_conversation_payload(
+        manifest,
+        fallback_workspace_id=fallback_workspace_id,
+        limit=limit,
+    ).get("workspace_conversation", [])
+    review["activity"] = workspace.get("activity") or {}
+    review["workspace_context"] = workspace.get("workspace_context") or {}
+    return review
+
+
 def _with_query_params(url, params):
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -981,6 +994,67 @@ def render_workspace_status(data):
 
 def render_workspace_conversation(data):
     console.print()
+
+
+def render_workspace_review(data):
+    console.print()
+    console.print("  [bold cyan]Workspace Review[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]id       [/dim] {data.get('workspace_id', '')}")
+    console.print(f"  [dim]name     [/dim] {data.get('name') or 'Unknown'}")
+    console.print(f"  [dim]status   [/dim] {data.get('status') or 'Unknown'}")
+    activity = data.get("activity") or {}
+    if activity:
+        console.print(
+            f"  [dim]activity [/dim] "
+            f"score={activity.get('activity_score', 0)} · "
+            f"asks={activity.get('ask_count', 0)} · "
+            f"notes={activity.get('notes_count', 0)} · "
+            f"pins={activity.get('pin_count', 0)} · "
+            f"artifacts={activity.get('artifact_count', 0)}"
+        )
+        if activity.get("last_meaningful_at"):
+            detail = activity.get("last_meaningful_detail") or activity.get("last_meaningful_source") or "workspace_activity"
+            console.print(f"  [dim]last     [/dim] {activity.get('last_meaningful_at')} ({detail})")
+    brief = data.get("investigation_brief") or {}
+    if brief.get("goal"):
+        console.print(f"  [dim]goal     [/dim] {brief.get('goal')}")
+    if brief.get("seed_address"):
+        console.print(f"  [dim]seed     [/dim] {brief.get('seed_address')}")
+    actions = brief.get("recommended_actions") or []
+    if actions:
+        print_rule()
+        console.print("  [bold]Recommended next actions[/bold]")
+        for action in actions[:3]:
+            if isinstance(action, dict):
+                title = action.get("title") or action.get("id") or "action"
+                line = f"  [dim]•[/dim] {title}"
+                if action.get("surface"):
+                    line += f" [dim]({action.get('surface')})[/dim]"
+                console.print(line)
+                if action.get("description"):
+                    console.print(f"    [dim]{action.get('description')}[/dim]")
+                hint = summarize_action_hint(action)
+                if hint:
+                    console.print(f"    [dim]{hint}[/dim]")
+            else:
+                console.print(f"  [dim]•[/dim] {action}")
+    thread = data.get("workspace_conversation") or []
+    if thread:
+        print_rule()
+        console.print("  [bold]Recent conversation[/bold]")
+        for item in thread[-3:]:
+            console.print(f"  [dim]•[/dim] {item.get('goal') or '(no goal)'}")
+            reply = item.get("planner_reply") or {}
+            if reply.get("summary"):
+                console.print(f"    [dim]{reply.get('summary')}[/dim]")
+            outcomes = item.get("execution_outcomes") or ([] if not item.get("execution_outcome") else [item.get("execution_outcome")])
+            if outcomes:
+                latest = outcomes[-1]
+                if isinstance(latest, dict):
+                    detail = latest.get("detail") or latest.get("label") or latest.get("type") or "outcome"
+                    console.print(f"    [dim]latest: {detail}[/dim]")
+    console.print()
     console.print("  [bold cyan]Workspace Conversation[/bold cyan]")
     print_rule()
     console.print(f"  [dim]id       [/dim] {data.get('workspace_id', '')}")
@@ -1363,6 +1437,10 @@ def output(data, agent, quiet):
 
     if "workspace_id" in data and "modules" in data and "status" in data:
         render_workspace_status(data)
+        return
+
+    if "investigation_brief" in data and "workspace_conversation" in data and "activity" in data:
+        render_workspace_review(data)
         return
 
     if "workspace_conversation" in data:
@@ -2115,6 +2193,27 @@ def workspace_conversation(workspace_id, limit, agent, quiet):
         return
     output(
         workspace_conversation_payload(
+            manifest,
+            fallback_workspace_id=workspace_id,
+            limit=limit,
+        ),
+        agent,
+        quiet,
+    )
+
+
+@workspace.command("review")
+@click.argument("workspace_id")
+@click.option("--limit", default=3, type=int, show_default=True, help="How many recent conversation turns to include.")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_review(workspace_id, limit, agent, quiet):
+    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in manifest:
+        output(manifest, agent, quiet)
+        return
+    output(
+        workspace_review_payload(
             manifest,
             fallback_workspace_id=workspace_id,
             limit=limit,
