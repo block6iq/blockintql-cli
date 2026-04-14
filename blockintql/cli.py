@@ -531,6 +531,30 @@ def workspace_brief_payload(manifest, fallback_workspace_id=None):
     }
 
 
+def extract_workspace_ask_history(payload):
+    candidates = [
+        payload.get("saved_state"),
+        payload.get("workspace_state"),
+        payload.get("state"),
+        (payload.get("workspace") or {}).get("saved_state") if isinstance(payload.get("workspace"), dict) else None,
+        payload.get("context"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict) and isinstance(candidate.get("ask_history"), list):
+            return candidate.get("ask_history") or []
+    return []
+
+
+def workspace_conversation_payload(manifest, fallback_workspace_id=None):
+    workspace = manifest.get("workspace") or {}
+    return {
+        "workspace_id": workspace.get("workspace_id") or fallback_workspace_id,
+        "name": workspace.get("name"),
+        "status": workspace.get("status"),
+        "workspace_conversation": extract_workspace_ask_history(manifest),
+    }
+
+
 def _with_query_params(url, params):
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -952,6 +976,66 @@ def render_workspace_status(data):
     console.print()
 
 
+def render_workspace_conversation(data):
+    console.print()
+    console.print("  [bold cyan]Workspace Conversation[/bold cyan]")
+    print_rule()
+    console.print(f"  [dim]id       [/dim] {data.get('workspace_id', '')}")
+    console.print(f"  [dim]name     [/dim] {data.get('name') or 'Unknown'}")
+    console.print(f"  [dim]status   [/dim] {data.get('status') or 'Unknown'}")
+    thread = data.get("workspace_conversation") or []
+    if not thread:
+        print_rule()
+        console.print("  [yellow]No saved asks in this workspace yet[/yellow]")
+        console.print()
+        return
+    for item in thread[-5:]:
+        print_rule()
+        console.print(f"  [bold]User Ask[/bold] [dim]{item.get('asked_at', '')}[/dim]")
+        console.print(f"  {item.get('goal') or '(no goal)'}")
+        if item.get("address"):
+            console.print(f"  [dim]seed     [/dim] {item.get('address')}")
+        if item.get("chain"):
+            console.print(f"  [dim]chain    [/dim] {item.get('chain')}")
+        reply = item.get("planner_reply") or {}
+        if reply:
+            console.print("  [bold]Planner Reply[/bold]")
+            if reply.get("summary"):
+                console.print(f"  [dim]summary  [/dim] {reply.get('summary')}")
+            if reply.get("mode"):
+                console.print(f"  [dim]mode     [/dim] {reply.get('mode')}")
+            if reply.get("recommended_surface"):
+                console.print(f"  [dim]surface  [/dim] {reply.get('recommended_surface')}")
+            if reply.get("estimated_total_credits") is not None:
+                line = f"  [dim]estimate [/dim] {reply.get('estimated_total_credits')} credits"
+                if reply.get("estimated_total_usd") is not None:
+                    line += f" · ${reply.get('estimated_total_usd')}"
+                console.print(line)
+            for action in (reply.get("recommended_actions") or [])[:3]:
+                if isinstance(action, dict):
+                    title = action.get("title") or action.get("id") or "action"
+                    console.print(f"  [dim]•[/dim] {title}")
+                    hint = summarize_action_hint(action)
+                    if hint:
+                        console.print(f"    [dim]{hint}[/dim]")
+                else:
+                    console.print(f"  [dim]•[/dim] {action}")
+        outcomes = item.get("execution_outcomes") or ([] if not item.get("execution_outcome") else [item.get("execution_outcome")])
+        if outcomes:
+            console.print("  [bold]Outcomes[/bold]")
+            for outcome in outcomes[-3:]:
+                if not isinstance(outcome, dict):
+                    continue
+                label = outcome.get("label") or outcome.get("type") or "outcome"
+                detail = outcome.get("detail") or ""
+                status = outcome.get("status")
+                status_text = f" [dim]({status})[/dim]" if status else ""
+                console.print(f"  [dim]•[/dim] {label}{status_text}")
+                if detail:
+                    console.print(f"    [dim]{detail}[/dim]")
+    console.print()
+
+
 def render_capability_catalog(data):
     console.print()
     console.print("  [bold cyan]Capabilities[/bold cyan]")
@@ -1276,6 +1360,10 @@ def output(data, agent, quiet):
 
     if "workspace_id" in data and "modules" in data and "status" in data:
         render_workspace_status(data)
+        return
+
+    if "workspace_conversation" in data:
+        render_workspace_conversation(data)
         return
 
     if "capabilities" in data and "surfaces" in data:
@@ -2010,6 +2098,18 @@ def workspace_brief(workspace_id, agent, quiet):
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_manifest(workspace_id, agent, quiet):
     output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
+
+
+@workspace.command("conversation")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_conversation(workspace_id, agent, quiet):
+    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in manifest:
+        output(manifest, agent, quiet)
+        return
+    output(workspace_conversation_payload(manifest, fallback_workspace_id=workspace_id), agent, quiet)
 
 
 @cli.command()
