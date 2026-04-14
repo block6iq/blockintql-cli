@@ -5,4 +5,5 @@ __pycache__/
 .eggs/
 build/
 *.egg
+integrations/javascript/*.tgz
 .env
