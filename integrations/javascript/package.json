@@ -1,11 +1,8 @@
 {
   "name": "blockintql",
-  "version": "1.0.0",
+  "version": "1.1.4",
   "description": "BlockINTQL — Sovereign Blockchain Intelligence for AI Agents",
   "main": "src/index.js",
-  "bin": {
-    "blockintql": "src/cli.js"
-  },
   "scripts": {
     "test": "node src/index.js"
   },
