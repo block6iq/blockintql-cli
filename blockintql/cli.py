@@ -28,7 +28,7 @@ BLOCKINTQL_BANNER = """
 [bold green]██╔══██╗██║     ██║   ██║██║     ██╔═██╗ ██║██║╚██╗██║   ██║   ██║▄▄ ██║██║     [/bold green]
 [bold green]██████╔╝███████╗╚██████╔╝╚██████╗██║  ██╗██║██║ ╚████║   ██║   ╚██████╔╝███████╗[/bold green]
 [bold green]╚═════╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝   ╚═╝    ╚══▀▀═╝ ╚══════╝[/bold green]
-[dim]  BlockINTQL · by Block6IQ · block6iq.com[/dim]
+[dim]  BlockINTQL · blockintql.com[/dim]
 """
 
 API_BASE = os.environ.get("BLOCKINTQL_API_URL", "https://btc-index-api-385334043904.us-central1.run.app")
@@ -587,9 +587,11 @@ def open_workspace_in_browser(workspace_id, resume_reason=None, resume_source=No
     url = workspace_launch_url(data)
     if not url:
         return "Workspace is not ready to open yet."
+    api_key = get_api_key()
     url = _with_query_params(
         url,
         {
+            "api_key": api_key,
             "resume": "1" if resume_reason else "",
             "resume_reason": resume_reason,
             "resume_source": resume_source,
@@ -1378,7 +1380,7 @@ def output(data, agent, quiet):
                 console.print(f"  [dim]{data['narrative'][:300]}[/dim]")
 
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print("  [dim]BlockINTQL · block6iq.com[/dim]")
+        console.print("  [dim]BlockINTQL · blockintql.com[/dim]")
         console.print()
         return
 
@@ -1399,7 +1401,7 @@ def output(data, agent, quiet):
             for l in p.get("linked_identifiers", [])[:5]:
                 console.print(f"  [dim]linked    [/dim] {l['identifier']} ({l['type']})")
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print("  [dim]BlockINTQL · OP_RETURN identity graph · block6iq.com[/dim]")
+        console.print("  [dim]BlockINTQL · OP_RETURN identity graph · blockintql.com[/dim]")
         console.print()
         return
 
