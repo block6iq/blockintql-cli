@@ -545,13 +545,16 @@ def extract_workspace_ask_history(payload):
     return []
 
 
-def workspace_conversation_payload(manifest, fallback_workspace_id=None):
+def workspace_conversation_payload(manifest, fallback_workspace_id=None, limit=None):
     workspace = manifest.get("workspace") or {}
+    thread = extract_workspace_ask_history(manifest)
+    if limit is not None:
+        thread = thread[-max(limit, 0):]
     return {
         "workspace_id": workspace.get("workspace_id") or fallback_workspace_id,
         "name": workspace.get("name"),
         "status": workspace.get("status"),
-        "workspace_conversation": extract_workspace_ask_history(manifest),
+        "workspace_conversation": thread,
     }
 
 
@@ -2102,14 +2105,23 @@ def workspace_manifest(workspace_id, agent, quiet):
 
 @workspace.command("conversation")
 @click.argument("workspace_id")
+@click.option("--limit", default=5, type=int, show_default=True, help="How many recent conversation turns to show.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-def workspace_conversation(workspace_id, agent, quiet):
+def workspace_conversation(workspace_id, limit, agent, quiet):
     manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
     if "error" in manifest:
         output(manifest, agent, quiet)
         return
-    output(workspace_conversation_payload(manifest, fallback_workspace_id=workspace_id), agent, quiet)
+    output(
+        workspace_conversation_payload(
+            manifest,
+            fallback_workspace_id=workspace_id,
+            limit=limit,
+        ),
+        agent,
+        quiet,
+    )
 
 
 @cli.command()
