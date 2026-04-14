@@ -12,6 +12,7 @@ Verify this by reading the source. Open source: github.com/block6iq/blockintql-c
 
 import sys, os, json
 from pathlib import Path
+from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 import click
 import httpx
 from rich.console import Console
@@ -153,6 +154,244 @@ def format_api_error(response, data):
     return result
 
 
+def api_put(path, body, require_auth=True):
+    try:
+        headers = get_headers() if require_auth else get_optional_headers()
+        r = httpx.put(f"{API_BASE}{path}", headers=headers, json=body, timeout=60)
+        data = r.json() if r.text else {}
+        if r.status_code >= 400:
+            return format_api_error(r, data)
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def create_workspace_from_plan(plan_result, quiet=False, agent=False):
+    recommended = plan_result.get("recommended_workspace") or {}
+    payload = recommended.get("payload") or {}
+    if not payload:
+        return None
+    if not quiet and not agent:
+        console.print("[dim]Opening recommended workspace...[/]")
+    created = api_post("/v1/workspaces/create", payload, require_auth=True)
+    if "error" in created:
+        return {
+            "execution_error": {
+                "detail": created["error"],
+                "source": "workspace_create_fallback",
+            }
+        }
+    return {
+        "execution_mode": "created_workspace_from_plan",
+        "executed_workspace": created,
+        "workspace_created_from_plan": True,
+    }
+
+
+def persist_workspace_ask_history(workspace_id, goal, address, chain, plan_result):
+    if not workspace_id:
+        return None
+    brief = plan_result.get("investigation_brief") or {}
+    actions = brief.get("recommended_actions") or []
+    execution_outcome = None
+    if plan_result.get("resume_workspace", {}).get("workspace_id"):
+        workspace = plan_result.get("resume_workspace") or {}
+        execution_outcome = {
+            "type": "resumed_workspace",
+            "label": workspace.get("name") or workspace.get("workspace_id") or "workspace",
+            "status": workspace.get("status"),
+            "detail": workspace.get("reason") or "Continued inside the selected workspace.",
+        }
+    elif plan_result.get("executed_workspace", {}).get("workspace_id"):
+        workspace = plan_result.get("executed_workspace") or {}
+        execution_outcome = {
+            "type": "created_workspace",
+            "label": workspace.get("name") or workspace.get("workspace_id") or "workspace",
+            "status": workspace.get("status"),
+            "detail": "Created a workspace from the plan.",
+        }
+    elif plan_result.get("execution_error"):
+        err = plan_result.get("execution_error") or {}
+        execution_outcome = {
+            "type": "execution_error",
+            "label": err.get("capability_id") or "execution",
+            "status": "error",
+            "detail": err.get("detail") or "Execution failed.",
+        }
+    normalized_actions = []
+    for action in actions[:3]:
+        if isinstance(action, dict):
+            normalized_actions.append({
+                "id": action.get("id"),
+                "title": action.get("title") or action.get("id"),
+                "description": action.get("description"),
+                "surface": action.get("surface"),
+                "target_panel": action.get("target_panel"),
+                "target_query_type": action.get("target_query_type"),
+                "preferred_focus": action.get("preferred_focus"),
+                "auto_chain_safe": action.get("auto_chain_safe"),
+            })
+        elif action:
+            normalized_actions.append({"title": str(action)})
+    planner_reply = {
+        "summary": plan_result.get("summary"),
+        "mode": (plan_result.get("intent") or {}).get("mode"),
+        "recommended_surface": plan_result.get("recommended_surface"),
+        "recommended_actions": normalized_actions,
+        "estimated_total_credits": plan_result.get("estimated_total_credits"),
+        "estimated_total_usd": plan_result.get("estimated_total_usd"),
+    }
+    entry = {
+        "asked_at": __import__("datetime").datetime.utcnow().isoformat(),
+        "goal": goal,
+        "address": address or None,
+        "chain": chain,
+        "recommended_surface": plan_result.get("recommended_surface"),
+        "intent_mode": (plan_result.get("intent") or {}).get("mode"),
+        "estimated_total_credits": plan_result.get("estimated_total_credits"),
+        "estimated_total_usd": plan_result.get("estimated_total_usd"),
+        "execution_mode": plan_result.get("execution_mode"),
+        "planner_reply": planner_reply,
+        "execution_outcome": execution_outcome,
+        "execution_outcomes": [execution_outcome] if execution_outcome else [],
+    }
+    return api_put(
+        f"/v1/workspaces/{workspace_id}/state",
+        {"saved_state": {"ask_history": [entry]}},
+        require_auth=True,
+    )
+
+
+def run_ask_flow(
+    goal,
+    address=None,
+    workspace_id=None,
+    chain="ethereum",
+    budget_credits=None,
+    budget_usd=None,
+    upto_budget_usd=None,
+    prefer_surface="auto",
+    execute_first_step=False,
+    open_workspace=False,
+    agent=False,
+    quiet=False,
+):
+    body = {
+        "goal": goal,
+        "chain": chain,
+        "prefer_surface": prefer_surface,
+        "execute": bool(execute_first_step),
+        "execute_workspace": bool(open_workspace),
+    }
+    if address:
+        body["address"] = address
+    if workspace_id:
+        body["workspace_id"] = workspace_id
+    if budget_credits is not None:
+        body["budget_credits"] = budget_credits
+    if budget_usd is not None:
+        body["budget_usd"] = budget_usd
+    if upto_budget_usd is not None:
+        body["upto_budget_usd"] = upto_budget_usd
+
+    require_auth = bool(workspace_id or open_workspace)
+    result = api_post("/v1/plan", body, require_auth=require_auth)
+
+    if "error" in result and (execute_first_step or open_workspace) and should_retry_plan_without_execution(result):
+        fallback_body = dict(body)
+        fallback_body["execute"] = False
+        fallback_body["execute_workspace"] = False
+        fallback = api_post("/v1/plan", fallback_body, require_auth=False)
+        if "error" not in fallback:
+            fallback["execution_skipped"] = {
+                "reason": "Execution requires credits or payment authorization",
+                "next": "Authenticate with an API key, add credits, or enable x402 before executing actions",
+            }
+            result = fallback
+
+    if workspace_id and "error" not in result:
+        workspace = api_get(f"/v1/workspaces/{workspace_id}", require_auth=True)
+        if "error" not in workspace:
+            result["resume_workspace"] = {
+                "workspace_id": workspace.get("workspace_id"),
+                "name": workspace.get("name"),
+                "status": workspace.get("status"),
+                "activity": workspace.get("activity") or {},
+                "reason": "Continued inside the selected workspace.",
+            }
+    elif open_workspace and "error" not in result and not result.get("resume_workspace"):
+        existing = api_get("/v1/workspaces", params={"limit": 10}, require_auth=True)
+        workspaces = existing.get("workspaces") if isinstance(existing, dict) else None
+        candidate = choose_resume_candidate(workspaces or [], seed_address=address, goal_text=goal)
+        if candidate and int((candidate.get("activity") or {}).get("activity_score", 0)) > 0:
+            result["resume_workspace"] = {
+                "workspace_id": candidate.get("workspace_id"),
+                "name": candidate.get("name"),
+                "status": candidate.get("status"),
+                "activity": candidate.get("activity") or {},
+                "reason": describe_resume_reason(candidate, seed_address=address, goal_text=goal),
+            }
+
+    if (
+        open_workspace
+        and "error" not in result
+        and not result.get("executed_workspace")
+        and not result.get("resume_workspace")
+        and result.get("recommended_workspace", {}).get("payload")
+        and not workspace_id
+    ):
+        fallback = create_workspace_from_plan(result, quiet=quiet, agent=agent)
+        if fallback:
+            result.update(fallback)
+
+    if "error" not in result and execute_first_step:
+        if result.get("execution_skipped"):
+            pass
+        elif result.get("executed_action", {}).get("result") is not None:
+            result = result["executed_action"]["result"]
+        else:
+            result = execute_planned_first_step(result, address)
+
+    target_workspace_id = None
+    if workspace_id:
+        target_workspace_id = workspace_id
+    elif result.get("resume_workspace", {}).get("workspace_id"):
+        target_workspace_id = result["resume_workspace"]["workspace_id"]
+    elif result.get("executed_workspace", {}).get("workspace_id"):
+        target_workspace_id = result["executed_workspace"]["workspace_id"]
+
+    if target_workspace_id and "error" not in result:
+        history_result = persist_workspace_ask_history(target_workspace_id, goal, address, chain, result)
+        if isinstance(history_result, dict) and "error" in history_result:
+            result["ask_history_warning"] = history_result["error"]
+
+    output(result, agent, quiet)
+
+    if open_workspace and not agent and not quiet and sys.stdout.isatty() and target_workspace_id:
+        resume_reason = None
+        resume_source = None
+        if result.get("resume_workspace", {}).get("workspace_id"):
+            resume_reason = result["resume_workspace"].get("reason")
+            resume_activity = result["resume_workspace"].get("activity") or {}
+            resume_source = "ask_resume_candidate_graph" if resume_activity.get("graph_initialized") else "ask_resume_candidate"
+        elif workspace_id:
+            resume_reason = "Continued inside the selected workspace."
+            resume_source = "workspace_chat"
+        open_result = open_workspace_in_browser(
+            target_workspace_id,
+            resume_reason=resume_reason,
+            resume_source=resume_source,
+        )
+        if open_result is None:
+            console.print("[dim]Browser opened to investigation workspace.[/]")
+        elif str(open_result).startswith("http"):
+            console.print(f"[dim]Open this URL manually:[/] {open_result}")
+        else:
+            console.print(f"[yellow]{open_result}[/]")
+
+    return result
+
+
 def enrich_with_provider(result, address, chain, provider_name, provider_key, provider_url):
     if not provider_name:
         return result
@@ -189,6 +428,106 @@ def enrich_with_provider(result, address, chain, provider_name, provider_key, pr
 
 def verdict_color(v):
     return {"CLEAR": "green", "CAUTION": "yellow", "BLOCK": "red"}.get(str(v).upper(), "white")
+
+
+def workspace_launch_url(manifest):
+    workspace = manifest.get("workspace", manifest) if isinstance(manifest, dict) else {}
+    runtime = manifest.get("runtime", {}) if isinstance(manifest, dict) else {}
+    entrypoints = runtime.get("entrypoints", {}) if isinstance(runtime, dict) else {}
+    capabilities = manifest.get("capabilities", {}) if isinstance(manifest, dict) else {}
+    return (
+        entrypoints.get("explorer_url")
+        if capabilities.get("graph_explorer")
+        else None
+    ) or entrypoints.get("graph_url") or workspace.get("graph_url") or workspace.get("access_url")
+
+
+def rank_workspaces(workspaces):
+    items = list(workspaces or [])
+    active = [item for item in items if item.get("status") not in {"destroyed", "failed"}]
+    return sorted(
+        active or items,
+        key=lambda item: (
+            int((item.get("activity") or {}).get("activity_score", 0)),
+            str((item.get("activity") or {}).get("last_meaningful_at") or ""),
+            str(item.get("state_updated_at") or item.get("updated_at") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def choose_resume_candidate(workspaces, seed_address=None, goal_text=""):
+    ranked = rank_workspaces(workspaces)
+    if not ranked:
+        return None
+    normalized_goal = (goal_text or "").strip().lower()
+    for item in ranked:
+        context = item.get("workspace_context") or {}
+        existing_seed = (context.get("seed_address") or "").strip().lower()
+        existing_goal = (context.get("goal") or "").strip().lower()
+        if seed_address and existing_seed == seed_address.strip().lower():
+            return item
+        if normalized_goal and existing_goal and normalized_goal in existing_goal:
+            return item
+    return ranked[0]
+
+
+def describe_resume_reason(workspace, seed_address=None, goal_text=""):
+    context = workspace.get("workspace_context") or {}
+    activity = workspace.get("activity") or {}
+    existing_seed = (context.get("seed_address") or "").strip().lower()
+    requested_seed = (seed_address or "").strip().lower()
+    existing_goal = (context.get("goal") or "").strip().lower()
+    requested_goal = (goal_text or "").strip().lower()
+    if requested_seed and existing_seed and requested_seed == existing_seed:
+        return "Resumed because this workspace already tracks the same seed address."
+    if requested_goal and existing_goal and requested_goal in existing_goal:
+        return "Resumed because this workspace already matches the current investigation goal."
+    if int(activity.get("activity_score", 0)) > 0:
+        return "Resumed because it has the strongest saved investigation activity for this API key."
+    return "Resumed because it is the best available workspace for this API key."
+
+
+def recommended_workspace_payload(workspace):
+    return {
+        "workspace_id": workspace.get("workspace_id"),
+        "name": workspace.get("name"),
+        "status": workspace.get("status"),
+        "activity": workspace.get("activity") or {},
+        "reason": workspace.get("reason"),
+        "workspace_context": workspace.get("workspace_context") or {},
+    }
+
+
+def _with_query_params(url, params):
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.update({key: value for key, value in params.items() if value not in (None, "")})
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def open_workspace_in_browser(workspace_id, resume_reason=None, resume_source=None):
+    import webbrowser
+
+    data = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in data:
+        return data.get("error")
+    url = workspace_launch_url(data)
+    if not url:
+        return "Workspace is not ready to open yet."
+    url = _with_query_params(
+        url,
+        {
+            "resume": "1" if resume_reason else "",
+            "resume_reason": resume_reason,
+            "resume_source": resume_source,
+        },
+    )
+    try:
+        webbrowser.open(url)
+        return None
+    except Exception:
+        return url
 
 
 def print_rule():
@@ -867,6 +1206,29 @@ def output(data, agent, quiet):
         render_plan(data)
         return
 
+    if "workspaces" in data and isinstance(data.get("workspaces"), list):
+        console.print()
+        console.print("  [bold cyan]Workspaces[/bold cyan]")
+        print_rule()
+        for workspace in data.get("workspaces") or []:
+            activity = workspace.get("activity") or {}
+            resume_badge = " [green](best resume)[/green]" if workspace.get("_resume_candidate") else ""
+            console.print(f"  [bold]{workspace.get('name') or workspace.get('workspace_id')}[/bold]{resume_badge}")
+            console.print(f"  [dim]id       [/dim] {workspace.get('workspace_id')}")
+            console.print(f"  [dim]status   [/dim] {workspace.get('status') or 'unknown'}")
+            console.print(
+                f"  [dim]state    [/dim] "
+                f"asks={activity.get('ask_count', 0)} · "
+                f"notes={activity.get('notes_count', 0)} · "
+                f"pins={activity.get('pin_count', 0)} · "
+                f"artifacts={activity.get('artifact_count', 0)} · "
+                f"score={activity.get('activity_score', 0)}"
+            )
+            if workspace.get("reason"):
+                console.print(f"  [dim]reason   [/dim] {workspace.get('reason')}")
+            print_rule()
+        return
+
     if not quiet:
         console.print_json(json.dumps(data, default=str))
 
@@ -1135,54 +1497,34 @@ def query(query, agent, quiet):
 
 @cli.command()
 @click.argument("goal")
-@click.option("--address", "-a", default="")
-@click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--address", "-a", default=None)
+@click.option("--workspace-id", default=None, help="Continue an existing workspace instead of starting fresh.")
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin", "ethereum"]))
 @click.option("--budget-credits", type=int, default=None)
 @click.option("--budget-usd", type=float, default=None)
+@click.option("--upto-budget-usd", type=float, default=None)
 @click.option("--surface", "prefer_surface", default="auto", type=click.Choice(["auto", "api", "cli", "mcp", "workspace"]))
 @click.option("--execute-first-step", is_flag=True, help="Execute the first recommended sync step after planning")
-@click.option("--open-workspace", is_flag=True, help="Create a workspace if the plan recommends one")
+@click.option("--open-workspace", is_flag=True, help="Prefer workspace execution and open a workspace when possible.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-def ask(goal, address, chain, budget_credits, budget_usd, prefer_surface, execute_first_step, open_workspace, agent, quiet):
+def ask(goal, address, workspace_id, chain, budget_credits, budget_usd, upto_budget_usd, prefer_surface, execute_first_step, open_workspace, agent, quiet):
     if not quiet and not agent:
         console.print("[dim]Planning investigation workflow...[/]")
-    body = {
-        "goal": goal,
-        "address": address,
-        "chain": chain,
-        "budget_credits": budget_credits,
-        "budget_usd": budget_usd,
-        "prefer_surface": prefer_surface,
-        "execute": bool(execute_first_step),
-        "execute_workspace": bool(open_workspace),
-    }
-    result = api_post("/v1/plan", body, require_auth=False)
-    if "error" in result and (execute_first_step or open_workspace) and should_retry_plan_without_execution(result):
-        fallback_body = dict(body)
-        fallback_body["execute"] = False
-        fallback = api_post("/v1/plan", fallback_body, require_auth=False)
-        if "error" not in fallback:
-            fallback["execution_skipped"] = {
-                "reason": "Execution requires credits or payment authorization",
-                "next": "Authenticate with an API key, add credits, or enable x402 before executing actions",
-            }
-            result = fallback
-    if "error" not in result and open_workspace:
-        if result.get("execution_skipped"):
-            pass
-        elif result.get("executed_workspace") is not None:
-            result = result["executed_workspace"]
-        else:
-            result = open_planned_workspace(result, address, goal)
-    elif "error" not in result and execute_first_step:
-        if result.get("execution_skipped"):
-            pass
-        elif result.get("executed_action", {}).get("result") is not None:
-            result = result["executed_action"]["result"]
-        else:
-            result = execute_planned_first_step(result, address)
-    output(result, agent, quiet)
+    run_ask_flow(
+        goal,
+        address=address,
+        workspace_id=workspace_id,
+        chain=chain,
+        budget_credits=budget_credits,
+        budget_usd=budget_usd,
+        upto_budget_usd=upto_budget_usd,
+        prefer_surface=prefer_surface,
+        execute_first_step=execute_first_step,
+        open_workspace=open_workspace,
+        agent=agent,
+        quiet=quiet,
+    )
 
 
 
@@ -1386,40 +1728,200 @@ def chart_counterparties(address, token, direction, days, limit, agent):
     render_counterparty_chart(result)
 
 
-@cli.group(hidden=True)
+@cli.group()
 def workspace():
-    """Ephemeral investigation workspace controls."""
+    """Manage investigation workspaces."""
 
 
 @workspace.command("create")
 @click.argument("name")
 @click.option("--chain", default="ethereum", type=click.Choice(["ethereum"]))
 @click.option("--modules", default="verdict,stablecoins,bridge-activity,chart")
+@click.option("--goal", default="", help="Short investigation brief stored with the workspace.")
+@click.option("--seed-address", default="", help="Seed address to focus the workspace on.")
 @click.option("--agent", is_flag=True)
-def workspace_create(name, chain, modules, agent):
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_create(name, chain, modules, goal, seed_address, agent, quiet):
     module_list = [m.strip() for m in modules.split(",") if m.strip()]
-    if not agent and sys.stdout.isatty():
+    payload = {"name": name, "chain": chain, "modules": module_list}
+    if goal.strip():
+        payload["goal"] = goal.strip()
+    if seed_address.strip():
+        payload["seed_address"] = seed_address.strip()
+    if not quiet and not agent:
         console.print("[dim]Provisioning investigation workspace...[/]")
-    result = api_post("/v1/workspaces/create", {"name": name, "chain": chain, "modules": module_list})
-    output(result, agent, False)
+    result = api_post("/v1/workspaces/create", payload, require_auth=True)
+    output(result, agent, quiet)
+
+
+@workspace.command("list")
+@click.option("--limit", default=10, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_list(limit, agent, quiet):
+    data = api_get("/v1/workspaces", params={"limit": limit}, require_auth=True)
+    workspaces = data.get("workspaces") if isinstance(data, dict) else None
+    if workspaces:
+        ranked = rank_workspaces(workspaces)
+        best_id = ranked[0].get("workspace_id") if ranked else None
+        marked = []
+        for item in ranked:
+            enriched = dict(item)
+            if best_id and item.get("workspace_id") == best_id:
+                enriched["_resume_candidate"] = True
+            marked.append(enriched)
+        data["workspaces"] = marked
+    output(data, agent, quiet)
 
 
 @workspace.command("status")
 @click.argument("workspace_id")
 @click.option("--agent", is_flag=True)
-def workspace_status(workspace_id, agent):
-    result = api_get(f"/v1/workspaces/{workspace_id}")
-    output(result, agent, False)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_status(workspace_id, agent, quiet):
+    result = api_get(f"/v1/workspaces/{workspace_id}", require_auth=True)
+    output(result, agent, quiet)
 
 
 @workspace.command("destroy")
 @click.argument("workspace_id")
 @click.option("--agent", is_flag=True)
-def workspace_destroy(workspace_id, agent):
-    if not agent and sys.stdout.isatty():
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_destroy(workspace_id, agent, quiet):
+    if not quiet and not agent:
         console.print("[dim]Destroying workspace...[/]")
-    result = api_post(f"/v1/workspaces/{workspace_id}/destroy", {})
-    output(result, agent, False)
+    result = api_post(f"/v1/workspaces/{workspace_id}/destroy", {}, require_auth=True)
+    output(result, agent, quiet)
+
+
+@workspace.command("open")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_open(workspace_id, agent, quiet):
+    data = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    workspace_data = data.get("workspace", data) if isinstance(data, dict) else data
+    output(workspace_data, agent, quiet)
+    if agent or quiet or not sys.stdout.isatty():
+        return
+    url = workspace_launch_url(data)
+    if not url:
+        console.print("[yellow]Workspace is not ready to open yet.[/]")
+        return
+    url = _with_query_params(url, {"resume": "1", "resume_reason": "Opened directly from the CLI workspace command.", "resume_source": "workspace_open"})
+    import webbrowser
+
+    try:
+        webbrowser.open(url)
+        console.print("[dim]Browser opened to workspace explorer.[/]")
+    except Exception:
+        console.print(f"[dim]Open this URL manually:[/] {url}")
+
+
+@workspace.command("resume")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_resume(agent, quiet):
+    data = api_get("/v1/workspaces", params={"limit": 10}, require_auth=True)
+    workspaces = data.get("workspaces") if isinstance(data, dict) else None
+    if not workspaces:
+        output({"error": "No workspaces found for this API key."}, agent, quiet)
+        return
+    preferred = rank_workspaces(workspaces)[0]
+    manifest = api_get(f"/v1/workspaces/{preferred['workspace_id']}/manifest", require_auth=True)
+    workspace_data = manifest.get("workspace", preferred) if isinstance(manifest, dict) else preferred
+    workspace_data = dict(workspace_data, reason=describe_resume_reason(preferred))
+    output(workspace_data, agent, quiet)
+    if agent or quiet or not sys.stdout.isatty():
+        return
+    open_result = open_workspace_in_browser(
+        preferred["workspace_id"],
+        resume_reason=workspace_data.get("reason"),
+        resume_source="workspace_resume",
+    )
+    if open_result is None:
+        console.print("[dim]Browser opened to most recent workspace explorer.[/]")
+    elif str(open_result).startswith("http"):
+        console.print(f"[dim]Open this URL manually:[/] {open_result}")
+    else:
+        console.print(f"[yellow]{open_result}[/]")
+
+
+@workspace.command("recommended")
+@click.option("--address", "-a", default=None)
+@click.option("--goal", default="")
+@click.option("--limit", default=10, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_recommended(address, goal, limit, agent, quiet):
+    data = api_get("/v1/workspaces", params={"limit": limit}, require_auth=True)
+    workspaces = data.get("workspaces") if isinstance(data, dict) else None
+    if not workspaces:
+        output({"error": "No workspaces found for this API key."}, agent, quiet)
+        return
+    candidate = choose_resume_candidate(workspaces, seed_address=address, goal_text=goal)
+    if not candidate:
+        output({"error": "No workspace recommendation available."}, agent, quiet)
+        return
+    enriched = dict(candidate)
+    enriched["reason"] = describe_resume_reason(candidate, seed_address=address, goal_text=goal)
+    output({"workspaces": [dict(recommended_workspace_payload(enriched), _resume_candidate=True)]}, agent, quiet)
+
+
+@workspace.command("chat")
+@click.argument("workspace_id")
+@click.argument("goal")
+@click.option("--address", "-a", default=None, help="Optional seed override for this follow-up ask.")
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin", "ethereum"]))
+@click.option("--budget-credits", type=int, default=None)
+@click.option("--budget-usd", type=float, default=None)
+@click.option("--upto-budget-usd", type=float, default=None)
+@click.option("--surface", "prefer_surface", default="auto", type=click.Choice(["auto", "api", "cli", "mcp", "workspace"]))
+@click.option("--execute-first-step", is_flag=True, help="Execute the first recommended sync step after planning")
+@click.option("--open-workspace", is_flag=True, help="Open the workspace after planning the follow-up ask.")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_chat(workspace_id, goal, address, chain, budget_credits, budget_usd, upto_budget_usd, prefer_surface, execute_first_step, open_workspace, agent, quiet):
+    if not quiet and not agent:
+        console.print("[dim]Continuing workspace conversation...[/]")
+    run_ask_flow(
+        goal,
+        address=address,
+        workspace_id=workspace_id,
+        chain=chain,
+        budget_credits=budget_credits,
+        budget_usd=budget_usd,
+        upto_budget_usd=upto_budget_usd,
+        prefer_surface=prefer_surface,
+        execute_first_step=execute_first_step,
+        open_workspace=open_workspace,
+        agent=agent,
+        quiet=quiet,
+    )
+
+
+@workspace.command("next")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_next(workspace_id, agent, quiet):
+    output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
+
+
+@workspace.command("brief")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_brief(workspace_id, agent, quiet):
+    output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
+
+
+@workspace.command("manifest")
+@click.argument("workspace_id")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def workspace_manifest(workspace_id, agent, quiet):
+    output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
 
 
 @cli.command()
