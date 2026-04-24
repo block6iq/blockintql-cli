@@ -10,7 +10,7 @@ PRIVACY ARCHITECTURE:
 Verify this by reading the source. Open source: github.com/block6iq/blockintql-cli
 """
 
-import sys, os, json
+import sys, os, json, base64
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 import click
@@ -19,7 +19,14 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 from . import __version__
-from .providers import get_provider, list_providers
+from .payments import (
+    PaymentError,
+    enforce_payment_policy,
+    ensure_wallet_runtime_ready,
+    load_payment_config,
+)
+from .providers import adjudicate_provider_result, get_provider, list_providers
+from .x402_runtime import request_with_x402
 
 # ── BANNER ────────────────────────────────────────────────────────────────────
 BLOCKINTQL_BANNER = """
@@ -29,13 +36,28 @@ BLOCKINTQL_BANNER = """
 [bold white]██╔══██╗██║     ██║   ██║██║     ██╔═██╗ ██║██║╚██╗██║   ██║   ██║▄▄ ██║██║     [/bold white]
 [bold white]██████╔╝███████╗╚██████╔╝╚██████╗██║  ██╗██║██║ ╚████║   ██║   ╚██████╔╝███████╗[/bold white]
 [bold white]╚═════╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝   ╚═╝    ╚══▀▀═╝ ╚══════╝[/bold white]
-[dim]  Sovereign Blockchain Intelligence · by Block6IQ · block6iq.com[/dim]
+[dim]  Sovereign Blockchain Intelligence · blockintql.com[/dim]
 """
 
-API_BASE = os.environ.get("BLOCKINTQL_API_URL", "https://blockintql.com")
+DEFAULT_API_BASE = "https://blockintql.com"
+DIRECT_API_BASE = "https://btc-index-api-385334043904.us-central1.run.app"
+API_BASE = os.environ.get("BLOCKINTQL_API_URL", DEFAULT_API_BASE)
 CONFIG_FILE = os.path.expanduser("~/.blockintql/config.json")
+PAYMENT_RESPONSE_HEADER_CANDIDATES = ("PAYMENT-RESPONSE", "payment-response")
 console = Console()
 err_console = Console(stderr=True)
+
+
+class DefaultingGroup(click.Group):
+    default_command_name = "balances"
+
+    def parse_args(self, ctx, args):
+        commands = set(self.list_commands(ctx))
+        if args:
+            first = args[0]
+            if first in {"--address", "-a"} or (not first.startswith("-") and first not in commands):
+                args.insert(0, self.default_command_name)
+        return super().parse_args(ctx, args)
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -51,6 +73,27 @@ def save_config(config):
 def get_api_key():
     return os.environ.get("BLOCKINTQL_API_KEY") or load_config().get("api_key")
 
+
+def get_admin_key():
+    return os.environ.get("BLOCKINTQL_ADMIN_KEY") or load_config().get("admin_api_key")
+
+
+def infer_chain_from_value(value, fallback="bitcoin"):
+    text = str(value or "").strip()
+    if text.startswith("0x") and len(text) == 42:
+        return "ethereum"
+    if text.startswith(("bc1", "1", "3")):
+        return "bitcoin"
+    if text.startswith("T") and len(text) == 34:
+        return "tron"
+    if text.startswith(("L", "M")):
+        return "litecoin"
+    return fallback
+
+
+def coalesce_address(argument_value=None, option_value=None):
+    return option_value or argument_value
+
 def get_headers():
     key = get_api_key()
     if not key:
@@ -58,34 +101,213 @@ def get_headers():
         sys.exit(1)
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
-def api_get(path, params=None, require_auth=True):
+
+def get_admin_headers():
+    key = get_admin_key()
+    if not key:
+        err_console.print("[red]No admin key.[/] Set BLOCKINTQL_ADMIN_KEY or save admin_api_key in config.")
+        sys.exit(1)
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+
+def _extract_payment_response(response):
+    for header_name in PAYMENT_RESPONSE_HEADER_CANDIDATES:
+        header_value = response.headers.get(header_name)
+        if not header_value:
+            continue
+        try:
+            return json.loads(base64.b64decode(header_value).decode("utf-8"))
+        except Exception:
+            try:
+                return json.loads(header_value)
+            except Exception:
+                return {"raw": header_value}
+    return None
+
+
+def _api_base_candidates():
+    bases = [API_BASE]
+    if API_BASE.rstrip("/") == DEFAULT_API_BASE.rstrip("/") and DIRECT_API_BASE not in bases:
+        bases.append(DIRECT_API_BASE)
+    return bases
+
+
+def _should_retry_direct_from_response(response):
+    return int(getattr(response, "status_code", 0) or 0) in {502, 503, 504, 520, 522, 524}
+
+
+def _should_retry_direct_from_exception(exc):
+    if isinstance(exc, httpx.ReadTimeout):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return int(exc.response.status_code or 0) in {502, 503, 504, 520, 522, 524}
+    return False
+
+
+def _attach_payment_metadata(payload, metadata):
+    if not metadata:
+        return payload
+    if isinstance(payload, dict):
+        enriched = dict(payload)
+        enriched["payment"] = metadata
+        return enriched
+    return {"result": payload, "payment": metadata}
+
+
+def _response_error_message(response):
+    try:
+        payload = response.json()
+        if isinstance(payload, dict) and payload.get("error"):
+            return payload["error"]
+    except Exception:
+        pass
+    return response.text or f"Request failed with status {response.status_code}."
+
+
+def _build_payment_metadata(payment_config, receipt=None, *, mode="x402-sdk"):
+    metadata = {
+        "wallet_type": payment_config.wallet_type,
+        "auto_pay": payment_config.auto_pay,
+        "max_payment_usd": payment_config.max_payment_usd,
+        "authorization_mode": mode,
+    }
+    if receipt is not None:
+        metadata["receipt"] = receipt
+    return metadata
+
+
+def _extract_payment_challenge(response):
+    try:
+        payload = response.json()
+        if isinstance(payload, dict) and payload.get("accepts"):
+            return payload
+    except Exception:
+        pass
+    header = response.headers.get("PAYMENT-REQUIRED")
+    if header:
+        try:
+            return json.loads(base64.b64decode(header).decode("utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _request_with_optional_payment(method, path, *, params=None, body=None, require_auth=True, timeout=30):
+    api_key = get_api_key()
+    config = load_config()
+    payment_config = load_payment_config(config)
+    headers = {"Content-Type": "application/json"}
+    if require_auth and api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    last_exception = None
+    response = None
+    url = None
+    for base in _api_base_candidates():
+        url = f"{base}{path}"
+        try:
+            candidate = httpx.request(method, url, headers=headers, params=params, json=body, timeout=timeout)
+            if (
+                base != _api_base_candidates()[-1]
+                and _should_retry_direct_from_response(candidate)
+            ):
+                response = candidate
+                continue
+            response = candidate
+            break
+        except Exception as exc:
+            last_exception = exc
+            if base != _api_base_candidates()[-1] and _should_retry_direct_from_exception(exc):
+                continue
+            raise
+
+    if response is None:
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("No API response received.")
+
+    if not (require_auth and not api_key and payment_config and response.status_code == 402):
+        response.raise_for_status()
+        return response.json()
+
+    challenge = _extract_payment_challenge(response) or {"error": response.text}
+    if not response.headers.get("PAYMENT-REQUIRED"):
+        raise PaymentError(
+            "The server did not return a standard x402 payment challenge.",
+            details={"status_code": response.status_code},
+        )
+    ensure_wallet_runtime_ready(payment_config)
+    payment_details = enforce_payment_policy(payment_config, challenge)
+    result = request_with_x402(
+        method,
+        url,
+        payment_config=payment_config,
+        params=params,
+        body=body,
+        headers=headers,
+        timeout=timeout,
+    )
+    if result.get("status_code", 0) >= 400:
+        raise PaymentError(
+            "The x402-paid request did not complete successfully.",
+            details=payment_details,
+        )
+    payment_metadata = dict(payment_details)
+    payment_metadata.update(_build_payment_metadata(payment_config, result.get("receipt")))
+    return _attach_payment_metadata(result.get("payload"), payment_metadata)
+
+def api_get(path, params=None, require_auth=True, timeout=30):
     """Query BlockINTQL API — sends address+chain ONLY, never provider keys."""
     try:
-        headers = get_headers() if require_auth else {"Content-Type": "application/json"}
-        r = httpx.get(f"{API_BASE}{path}", headers=headers, params=params, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        return _request_with_optional_payment(
+            "GET",
+            path,
+            params=params,
+            require_auth=require_auth,
+            timeout=timeout,
+        )
+    except PaymentError as e:
+        return e.to_dict()
     except Exception as e:
         return {"error": str(e)}
 
-def api_post(path, body, require_auth=True):
+def api_post(path, body, require_auth=True, timeout=60):
     """Query BlockINTQL API — sends address+chain ONLY, never provider keys."""
     try:
-        headers = get_headers() if require_auth else {"Content-Type": "application/json"}
-        r = httpx.post(f"{API_BASE}{path}", headers=headers, json=body, timeout=60)
-        r.raise_for_status()
-        return r.json()
+        return _request_with_optional_payment(
+            "POST",
+            path,
+            body=body,
+            require_auth=require_auth,
+            timeout=timeout,
+        )
+    except PaymentError as e:
+        return e.to_dict()
     except Exception as e:
         return {"error": str(e)}
 
 
-def api_put(path, body, require_auth=True):
+def api_put(path, body, require_auth=True, timeout=60):
     """Update BlockINTQL API resources with authenticated JSON payloads."""
     try:
-        headers = get_headers() if require_auth else {"Content-Type": "application/json"}
-        r = httpx.put(f"{API_BASE}{path}", headers=headers, json=body, timeout=60)
-        r.raise_for_status()
-        return r.json()
+        return _request_with_optional_payment(
+            "PUT",
+            path,
+            body=body,
+            require_auth=require_auth,
+            timeout=timeout,
+        )
+    except PaymentError as e:
+        return e.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def admin_api_get(path, params=None, timeout=30):
+    try:
+        response = httpx.get(f"{API_BASE}{path}", headers=get_admin_headers(), params=params, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
     except Exception as e:
         return {"error": str(e)}
 
@@ -187,7 +409,7 @@ def persist_workspace_ask_history(workspace_id, goal, address, chain, plan_resul
 
 
 def run_ask_flow(goal, address=None, workspace_id=None, chain="ethereum", budget_credits=None, budget_usd=None,
-                 upto_budget_usd=None, open_workspace=False, agent=False, quiet=False):
+                 upto_budget_usd=None, open_workspace=False, mode=None, agent=False, quiet=False):
     body = {
         "goal": goal,
         "chain": chain,
@@ -202,6 +424,8 @@ def run_ask_flow(goal, address=None, workspace_id=None, chain="ethereum", budget
         body["budget_usd"] = budget_usd
     if upto_budget_usd is not None:
         body["upto_budget_usd"] = upto_budget_usd
+    if mode:
+        body["execution_profile"] = mode
     if open_workspace:
         body["prefer_surface"] = "workspace"
         body["execute_workspace"] = True
@@ -315,9 +539,11 @@ def open_workspace_in_browser(workspace_id, resume_reason=None, resume_source=No
     url = workspace_launch_url(data)
     if not url:
         return "Workspace is not ready to open yet."
+    api_key = get_api_key()
     url = _with_query_params(
         url,
         {
+            "api_key": api_key,
             "resume": "1" if resume_reason else "",
             "resume_reason": resume_reason,
             "resume_source": resume_source,
@@ -351,15 +577,37 @@ def enrich_with_provider(result, address, chain, provider_name, provider_key, pr
     if "error" in pd.get("raw", {}):
         return result
 
+    provider_policy = adjudicate_provider_result(pd)
+
     # Merge — take higher risk score
     result["risk_score"] = max(pd.get("risk_score", 0), result.get("risk_score", 0))
     if pd.get("entity_name") and not result.get("entity"):
         result["entity"] = pd["entity_name"]
-    if pd.get("sanctions_hit"):
+    provider_recommended_verdict = provider_policy.get("recommended_verdict")
+    canonical_category = provider_policy.get("canonical_category")
+    if pd.get("sanctions_hit") or provider_recommended_verdict == "BLOCK":
         result["verdict"] = "BLOCK"
         result["safe"] = False
-        result.setdefault("risk_indicators", []).append("SANCTIONS")
-    # Store provider summary (not raw response) for display
+        if canonical_category:
+            result.setdefault("risk_indicators", []).append(f"PROVIDER_{canonical_category.upper()}")
+    elif provider_recommended_verdict in {"CAUTION", "UNKNOWN"} and result.get("verdict") == "CLEAR":
+        result["verdict"] = "CAUTION"
+        result["safe"] = False
+        if canonical_category:
+            result.setdefault("risk_indicators", []).append(f"PROVIDER_{canonical_category.upper()}")
+
+    risk_indicators = []
+    for item in result.get("risk_indicators", []):
+        if item not in risk_indicators:
+            risk_indicators.append(item)
+    result["risk_indicators"] = risk_indicators
+
+    if provider_recommended_verdict in {"CAUTION", "UNKNOWN"}:
+        result["action"] = "review"
+    if provider_recommended_verdict == "BLOCK":
+        result["action"] = "block"
+
+    # Store an allowlisted summary only. Raw provider responses stay local.
     result["provider_data"] = {
         "provider": provider_name,
         "entity_name": pd.get("entity_name"),
@@ -367,11 +615,218 @@ def enrich_with_provider(result, address, chain, provider_name, provider_key, pr
         "risk_score": pd.get("risk_score", 0),
         "risk_indicators": pd.get("risk_indicators", []),
         "sanctions_hit": pd.get("sanctions_hit", False),
+        "canonical_category": canonical_category,
+        "recommended_verdict": provider_recommended_verdict,
+        "severity": provider_policy.get("severity"),
+        "confidence": provider_policy.get("confidence"),
+        "reasons": provider_policy.get("reasons", []),
     }
     return result
 
 def verdict_color(v):
     return {"CLEAR": "green", "CAUTION": "yellow", "BLOCK": "red"}.get(str(v).upper(), "white")
+
+
+def _as_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _short_addr(value, width=12):
+    text = str(value or "")
+    if len(text) <= width:
+        return text
+    keep = max(4, (width - 3) // 2)
+    return f"{text[:keep]}...{text[-keep:]}"
+
+
+def _sparkline(values):
+    ticks = "▁▂▃▄▅▆▇█"
+    nums = [_as_float(v) for v in values]
+    if not nums or max(nums) <= 0:
+        return "·" * max(1, len(nums))
+    peak = max(nums)
+    chars = []
+    for value in nums:
+        idx = int(round((value / peak) * (len(ticks) - 1)))
+        chars.append(ticks[max(0, min(idx, len(ticks) - 1))])
+    return "".join(chars)
+
+
+def _bar(value, peak, width=24):
+    if peak <= 0:
+        return ""
+    filled = int(round((_as_float(value) / peak) * width))
+    return "█" * max(0, min(filled, width))
+
+
+def render_stablecoin_flow_chart(result, *, hours=24, interval="hour", token=None):
+    data = (result or {}).get("data") or {}
+    rows = data.get("series") or []
+    window_hours_used = int(data.get("window_hours_used") or hours or 0)
+    source = (result or {}).get("source") or "unknown"
+    if not rows:
+        console.print("[yellow]No stablecoin flow data available for that window.[/]")
+        if window_hours_used and window_hours_used != hours:
+            console.print(f"[dim]Tried widening from {hours}h to {window_hours_used}h via {source}.[/]")
+        else:
+            console.print("[dim]Try a wider window like `--hours 72` or `--hours 168`, or focus a token with `--token USDC` / `--token USDT`.[/]")
+        return
+
+    grouped = {}
+    for row in rows:
+        symbol = row.get("token_symbol") or "UNKNOWN"
+        grouped.setdefault(symbol, []).append(row)
+
+    summary = data.get("summary") or {}
+    peak_summary_volume = max(
+        (_as_float((details or {}).get("total_volume")) for details in summary.values()),
+        default=0.0,
+    )
+    console.print()
+    console.print("[bold cyan]Stablecoin Flow Chart[/bold cyan]")
+    header_bits = [f"{hours}h requested", f"{window_hours_used}h scanned", f"interval={interval}", f"token={token or 'all'}", f"source={source}"]
+    console.print(f"[dim]{' · '.join(header_bits)}[/dim]")
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    if summary:
+        console.print("[bold]Market Summary[/bold]")
+        for symbol, details in sorted(
+            summary.items(),
+            key=lambda item: _as_float((item[1] or {}).get("total_volume")),
+            reverse=True,
+        ):
+            total_volume = _as_float((details or {}).get("total_volume"))
+            transfer_count = int((details or {}).get("transfer_count") or 0)
+            bar = _bar(total_volume, peak_summary_volume, width=20)
+            console.print(
+                f"[bold]{symbol:<5}[/bold] {bar:<20} "
+                f"[dim]vol[/dim] ${total_volume:,.0f}  [dim]tx[/dim] {transfer_count}"
+            )
+        console.print(f"[dim]{'─' * 76}[/dim]")
+    for symbol, series in sorted(grouped.items()):
+        ordered = sorted(series, key=lambda item: str(item.get("bucket") or ""))
+        values = [_as_float(item.get("total_volume")) for item in ordered]
+        transfer_count = sum(int(item.get("transfer_count") or 0) for item in ordered)
+        largest_transfer = max((_as_float(item.get("largest_transfer")) for item in ordered), default=0.0)
+        unique_senders = max((int(item.get("unique_senders") or 0) for item in ordered), default=0)
+        unique_receivers = max((int(item.get("unique_receivers") or 0) for item in ordered), default=0)
+        console.print(
+            f"[bold]{symbol:>5}[/bold]  {_sparkline(values)}  "
+            f"[dim]vol[/dim] ${sum(values):,.0f}  [dim]tx[/dim] {transfer_count}"
+        )
+        console.print(
+            f"      [dim]peak transfer[/dim] ${largest_transfer:,.0f}  "
+            f"[dim]senders[/dim] {unique_senders}  [dim]receivers[/dim] {unique_receivers}"
+        )
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    console.print("[dim]BlockINTQL · terminal chart[/dim]")
+    console.print()
+
+
+def render_wallet_stablecoin_chart(result, *, address, days=30, token=None):
+    data = (result or {}).get("data") or {}
+    rows = data.get("rows") or []
+    if not rows:
+        console.print("[yellow]No wallet stablecoin history found for that window.[/]")
+        return
+
+    grouped = {}
+    for row in rows:
+        symbol = row.get("token_symbol") or "UNKNOWN"
+        grouped.setdefault(symbol, []).append(row)
+
+    console.print()
+    console.print("[bold cyan]Wallet Stablecoin Chart[/bold cyan]")
+    console.print(f"[dim]{_short_addr(address, 18)} · {days}d · token={token or 'all'}[/dim]")
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    for symbol, series in sorted(grouped.items()):
+        ordered = sorted(series, key=lambda item: str(item.get("bucket") or ""))
+        incoming = sum(_as_float(item.get("incoming_amount")) for item in ordered)
+        outgoing = sum(_as_float(item.get("outgoing_amount")) for item in ordered)
+        peak = max(
+            max((_as_float(item.get("incoming_amount")) for item in ordered), default=0.0),
+            max((_as_float(item.get("outgoing_amount")) for item in ordered), default=0.0),
+            1.0,
+        )
+        console.print(
+            f"[bold]{symbol:>5}[/bold]  [dim]in[/dim] {incoming:,.2f}  "
+            f"[dim]out[/dim] {outgoing:,.2f}  [dim]net[/dim] {incoming - outgoing:,.2f}"
+        )
+        for row in ordered[-8:]:
+            bucket = str(row.get("bucket") or "")[:10]
+            in_amount = _as_float(row.get("incoming_amount"))
+            out_amount = _as_float(row.get("outgoing_amount"))
+            in_bar = _bar(in_amount, peak, width=12)
+            out_bar = _bar(out_amount, peak, width=12)
+            console.print(
+                f"      [dim]{bucket}[/dim]  "
+                f"[green]{in_bar:<12}[/green] [dim]{in_amount:>10,.2f}[/dim]  "
+                f"[red]{out_bar:<12}[/red] [dim]{out_amount:>10,.2f}[/dim]"
+            )
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    console.print("[dim]green=inbound · red=outbound[/dim]")
+    console.print("[dim]BlockINTQL · terminal chart[/dim]")
+    console.print()
+
+
+def render_wallet_stablecoin_balances_chart(result, *, address):
+    data = (result or {}).get("data") or {}
+    balances = (data.get("stablecoin_balances") or {})
+    rows = []
+    for symbol, details in balances.items():
+        amount = _as_float((details or {}).get("balance"))
+        rows.append((symbol, amount))
+
+    if not rows or max((amount for _, amount in rows), default=0.0) <= 0:
+        console.print("[yellow]No major stablecoin balances detected for that wallet.[/]")
+        return
+
+    peak = max(amount for _, amount in rows)
+    total = _as_float(data.get("wallet_total_usd"))
+    console.print()
+    console.print("[bold cyan]Wallet Stablecoin Balances[/bold cyan]")
+    console.print(f"[dim]{_short_addr(address, 18)} · current holdings[/dim]")
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    for symbol, amount in sorted(rows, key=lambda item: item[1], reverse=True):
+        bar = _bar(amount, peak)
+        console.print(
+            f"[bold]{symbol:<5}[/bold] {bar:<24} "
+            f"[dim]balance[/dim] {amount:,.2f}"
+        )
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    console.print(f"[dim]tracked total[/dim] ${total:,.2f}")
+    console.print("[dim]BlockINTQL · terminal chart[/dim]")
+    console.print()
+
+
+def render_counterparty_chart(result, *, address, token=None):
+    data = (result or {}).get("data") or {}
+    rows = data.get("rows") or []
+    if not rows:
+        console.print("[yellow]No stablecoin counterparties found for that wallet.[/]")
+        return
+
+    top_rows = rows[:10]
+    peak = max((_as_float(row.get("total_amount")) for row in top_rows), default=0.0)
+    console.print()
+    console.print("[bold cyan]Counterparty Chart[/bold cyan]")
+    console.print(f"[dim]{_short_addr(address, 18)} · token={token or 'all'}[/dim]")
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    for row in top_rows:
+        amount = _as_float(row.get("total_amount"))
+        label = _short_addr(row.get("counterparty"), 18)
+        direction = row.get("direction") or "both"
+        symbol = row.get("token_symbol") or "UNKNOWN"
+        bar = _bar(amount, peak)
+        console.print(
+            f"[bold]{label:<18}[/bold] {bar:<24} "
+            f"[dim]{symbol} {direction}[/dim] ${amount:,.0f} [dim]tx[/dim] {int(row.get('tx_count') or 0)}"
+        )
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    console.print("[dim]BlockINTQL · terminal chart[/dim]")
+    console.print()
 
 
 def workspace_launch_url(manifest):
@@ -463,6 +918,64 @@ def summarize_plan_steps(steps):
     return items
 
 
+def materialize_cli_command(command, *, address="", execution_profile=None):
+    cmd = (command or "").strip()
+    if not cmd:
+        return None
+    if address:
+        cmd = cmd.replace("<address>", address)
+    if execution_profile and "--mode" not in cmd:
+        if cmd.startswith("blockintql prediction market analysis"):
+            cmd = f"{cmd} --mode {execution_profile}"
+        elif cmd.startswith("blockintql ask "):
+            cmd = f"{cmd} --mode {execution_profile}"
+    return cmd
+
+
+def continue_plan_instructions(data):
+    brief = data.get("investigation_brief") or {}
+    selected_profile = data.get("selected_execution_profile") or {}
+    execution_profile = selected_profile.get("id")
+    address = (brief.get("seed_address") or data.get("address") or "").strip()
+    commands = []
+    seen_commands = set()
+    workspace_needed = False
+
+    for step in data.get("steps") or []:
+        capability_id = step.get("capability_id")
+        surface = step.get("surface")
+        execution = step.get("execution")
+        if capability_id in {"workspace_create", "graph_build"} or surface == "workspace" or execution == "interactive":
+            workspace_needed = True
+            continue
+        command = materialize_cli_command(
+            step.get("cli_command"),
+            address=address,
+            execution_profile=execution_profile,
+        )
+        if command and command not in seen_commands:
+            commands.append(command)
+            seen_commands.add(command)
+
+    if (
+        data.get("recommended_surface") == "workspace"
+        or data.get("executed_workspace")
+        or data.get("resume_workspace")
+        or data.get("recommended_workspace")
+    ):
+        workspace_needed = True
+
+    workspace_actions = []
+    if workspace_needed:
+        workspace_actions = [
+            "Run Expansion",
+            "Sync Artifacts",
+            "Hydrate Graph",
+        ]
+
+    return commands, workspace_actions
+
+
 def format_money(value):
     if value is None:
         return None
@@ -477,6 +990,31 @@ def output(data, agent, quiet):
         return
     if "error" in data:
         err_console.print(f"  [red]✗[/red] {data['error']}")
+        return
+
+    if "reply" in data and "session_id" in data:
+        console.print()
+        console.print("  [bold cyan]BLOCKINTQL CHAT[/bold cyan]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]session  [/dim] {data.get('session_id')}")
+        console.print(f"  [dim]credits  [/dim] {data.get('credits_charged', 0)}")
+        if (data.get("session") or {}).get("seed_address"):
+            console.print(f"  [dim]seed     [/dim] {(data.get('session') or {}).get('seed_address')}")
+        console.print(f"  [dim]scope    [/dim] {data.get('scope', 'unknown')}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  {data.get('reply')}")
+        methodology = data.get("methodology") or {}
+        risk = methodology.get("risk_assessment") or {}
+        patterns = methodology.get("laundering_patterns") or []
+        if risk.get("band") or patterns:
+            console.print(f"  [dim]{'─' * 52}[/dim]")
+            if risk.get("band"):
+                console.print(f"  [dim]method   [/dim] {risk.get('band')} · score {risk.get('score')}")
+            if patterns:
+                console.print(f"  [dim]patterns [/dim] {', '.join(item.get('label') or item.get('id') for item in patterns[:4])}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print("  [dim]BlockINTQL · compliance + blockchain forensics only[/dim]")
+        console.print()
         return
 
     # ── VERDICT ────────────────────────────────────────────────────────────────
@@ -505,15 +1043,50 @@ def output(data, agent, quiet):
                 console.print(f"  [dim]{pd.get('provider','').upper()} · local · key never sent to BlockINTQL[/dim]")
                 if pd.get("entity_name"):
                     console.print(f"  [dim]entity  [/dim] {pd['entity_name']}")
+                if pd.get("canonical_category"):
+                    console.print(f"  [dim]class   [/dim] {pd.get('canonical_category')}")
                 console.print(f"  [dim]risk    [/dim] {pd.get('risk_score',0)}/100")
+                if pd.get("recommended_verdict"):
+                    console.print(f"  [dim]policy  [/dim] {pd.get('recommended_verdict')} · {pd.get('confidence','unknown')} confidence")
                 if pd.get("sanctions_hit"):
                     console.print(f"  [red]  ⚠  SANCTIONS HIT[/red]")
+                elif pd.get("reasons"):
+                    console.print(f"  [dim]why     [/dim] {pd.get('reasons')[0]}")
             if data.get("narrative"):
                 console.print(f"  [dim]{'─' * 52}[/dim]")
                 console.print(f"  [dim]{data['narrative'][:300]}[/dim]")
 
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print(f"  [dim]BlockINTQL · block6iq.com[/dim]")
+        console.print(f"  [dim]BlockINTQL · blockintql.com[/dim]")
+        console.print()
+        return
+
+    if "verdict" in data and "findings" in data:
+        color = verdict_color(data.get("verdict"))
+        findings = data.get("findings") or {}
+        methodology = data.get("methodology") or {}
+        risk = methodology.get("risk_assessment") or {}
+        console.print()
+        console.print(f"  [bold {color}]{data.get('verdict')}[/bold {color}]  [dim]·[/dim]  [{color}]{findings.get('max_risk_score', 0)}/100 risk[/{color}]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]chain    [/dim] {data.get('chain', '')}")
+        console.print(f"  [dim]subjects [/dim] {data.get('addresses_analyzed', 0)} address(es)")
+        plan = data.get("execution_plan") or {}
+        if plan.get("mode"):
+            console.print(f"  [dim]mode     [/dim] {plan.get('mode')}")
+        if data.get("narrative"):
+            console.print(f"  [dim]summary  [/dim] {data.get('narrative')}")
+        if risk.get("band"):
+            console.print(f"  [dim]method   [/dim] {risk.get('band')} · score {risk.get('score')}")
+        patterns = methodology.get("laundering_patterns") or []
+        if patterns:
+            console.print(f"  [dim]patterns [/dim] {', '.join(item.get('label') or item.get('id') for item in patterns[:4])}")
+        if findings.get("sanctions_hits"):
+            console.print(f"  [dim]sanctions[/dim] {len(findings.get('sanctions_hits') or [])} hit(s)")
+        if findings.get("aml_flags"):
+            console.print(f"  [dim]aml      [/dim] {', '.join(str(flag) for flag in (findings.get('aml_flags') or [])[:4])}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print("  [dim]BlockINTQL · methodology-grounded analysis[/dim]")
         console.print()
         return
 
@@ -535,7 +1108,7 @@ def output(data, agent, quiet):
             for l in p.get("linked_identifiers", [])[:5]:
                 console.print(f"  [dim]linked    [/dim] {l['identifier']} ({l['type']})")
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print(f"  [dim]BlockINTQL · OP_RETURN identity graph · block6iq.com[/dim]")
+        console.print(f"  [dim]BlockINTQL · OP_RETURN identity graph · blockintql.com[/dim]")
         console.print()
         return
 
@@ -554,7 +1127,7 @@ def output(data, agent, quiet):
         if data.get("created_at"):
             console.print(f"  [dim]created  [/dim] {data['created_at']}")
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print(f"  [dim]BlockINTQL · block6iq.com[/dim]")
+        console.print(f"  [dim]BlockINTQL · blockintql.com[/dim]")
         console.print()
         return
 
@@ -641,6 +1214,14 @@ def output(data, agent, quiet):
                 console.print(f"    {step['idx']}. {step['title']} [dim]({step['surface']}{step['optional']})[/dim]")
                 if step["reason"]:
                     console.print(f"       [dim]{step['reason']}[/dim]")
+        selected_profile = data.get("selected_execution_profile") or {}
+        if selected_profile.get("label"):
+            line = f"  [dim]selected [/dim] {selected_profile.get('label')}"
+            if selected_profile.get("id"):
+                line += f" [dim]({selected_profile.get('id')})[/dim]"
+            console.print(line)
+            if selected_profile.get("description"):
+                console.print(f"  [dim]profile  [/dim] {selected_profile.get('description')}")
         profiles = data.get("execution_profiles") or []
         if profiles:
             console.print("  [dim]execution modes[/dim]")
@@ -671,6 +1252,17 @@ def output(data, agent, quiet):
                         console.print(f"      [dim]{action.get('description')}[/dim]")
                 else:
                     console.print(f"    • {action}")
+        continue_commands, workspace_actions = continue_plan_instructions(data)
+        if continue_commands or workspace_actions:
+            selected_label = (selected_profile.get("label") or "").strip()
+            heading = "continue with selected mode" if selected_label else "continue with this plan"
+            console.print(f"  [dim]{heading}[/dim]")
+            for command in continue_commands[:4]:
+                console.print(f"    [cyan]$[/cyan] {command}")
+            if workspace_actions:
+                console.print("    [dim]Then in the workspace:[/dim]")
+                for idx, action in enumerate(workspace_actions, start=1):
+                    console.print(f"      {idx}. {action}")
         guardrails = data.get("cost_guardrails") or {}
         if guardrails.get("message"):
             console.print(f"  [dim]guardrail[/dim] {guardrails.get('message')}")
@@ -680,7 +1272,7 @@ def output(data, agent, quiet):
         if data.get("ask_history_warning"):
             console.print(f"  [yellow]history  [/yellow] {data.get('ask_history_warning')}")
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print(f"  [dim]BlockINTQL · block6iq.com[/dim]")
+        console.print(f"  [dim]BlockINTQL · blockintql.com[/dim]")
         console.print()
         return
 
@@ -711,6 +1303,30 @@ def output(data, agent, quiet):
             if workspace.get("reason"):
                 console.print(f"  [dim]reason   [/dim] {workspace.get('reason')}")
             console.print(f"  [dim]{'─' * 52}[/dim]")
+        return
+
+    if "summary" in data and "workspace_active" in data and "recent_refunds" in data:
+        console.print()
+        console.print("  [bold cyan]VM AUDIT[/bold cyan]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        summary = data.get("summary") or {}
+        console.print(f"  [dim]workspace active [/dim] {summary.get('workspace_active', 0)}")
+        console.print(f"  [dim]warehouse active [/dim] {summary.get('warehouse_active', 0)}")
+        console.print(f"  [dim]destroyed recent [/dim] {summary.get('workspace_destroyed_recent', 0)}")
+        console.print(f"  [dim]refunds recent   [/dim] {summary.get('warehouse_refunds_recent', 0)}")
+        policy = data.get("cleanup_policy") or {}
+        console.print(f"  [dim]ttl policy       [/dim] workspace idle {policy.get('workspace_idle_ttl_hours')}h · max {policy.get('workspace_max_ttl_hours')}h · warehouse {policy.get('warehouse_grace_minutes')}m")
+        if data.get("warehouse_active"):
+            console.print("  [dim]active warehouse[/dim]")
+            for row in (data.get("warehouse_active") or [])[:5]:
+                console.print(f"    • {row.get('query_id')} · {row.get('status')} · {row.get('vm_name') or 'no-vm'}")
+        if data.get("recent_refunds"):
+            console.print("  [dim]recent refunds[/dim]")
+            for row in (data.get("recent_refunds") or [])[:5]:
+                console.print(f"    • {row.get('query_id')} · +{row.get('refunded_credits', 0)} credits · {row.get('cleanup_reason') or row.get('status')}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print("  [dim]BlockINTQL admin audit[/dim]")
+        console.print()
         return
 
     if "workspace_id" in data and "status" in data and "poll_url" in data:
@@ -746,7 +1362,7 @@ def output(data, agent, quiet):
         for note in data.get("notes") or []:
             console.print(f"  [dim]note     [/dim] {note}")
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print(f"  [dim]BlockINTQL · block6iq.com[/dim]")
+        console.print(f"  [dim]BlockINTQL · blockintql.com[/dim]")
         console.print()
         return
 
@@ -780,6 +1396,8 @@ def cli(ctx):
     if ctx.invoked_subcommand is None:
         console.print(BLOCKINTQL_BANNER)
         click.echo(ctx.get_help())
+        console.print()
+        console.print("[dim]Wallet-based access:[/] [bold]blockintql login --auto-pay --max-payment 0.10[/]")
 
 @cli.command()
 @click.option("--api-key", required=True)
@@ -796,7 +1414,7 @@ def auth(api_key, provider):
 
 @cli.command()
 @click.option("--address", "-a", required=True)
-@click.option("--chain", "-c", default="bitcoin", type=click.Choice(["bitcoin","ethereum"]))
+@click.option("--chain", "-c", default="auto", type=click.Choice(["auto","bitcoin","ethereum"]))
 @click.option("--context", default="")
 @with_provider
 @click.option("--agent", is_flag=True)
@@ -813,6 +1431,7 @@ def verdict(address, chain, context, provider, provider_key, provider_url, agent
       blockintql verdict --address 1A1zP1e...
       blockintql verdict --address 0x123... --provider chainalysis --provider-key $KEY
     """
+    chain = infer_chain_from_value(address, fallback="bitcoin") if chain == "auto" else chain
     config = load_config()
     provider = provider or config.get("default_provider")
     if not quiet and not agent:
@@ -830,7 +1449,7 @@ def verdict(address, chain, context, provider, provider_key, provider_url, agent
 
 @cli.command()
 @click.option("--address", "-a", required=True)
-@click.option("--chain", "-c", default="bitcoin", type=click.Choice(["bitcoin","ethereum"]))
+@click.option("--chain", "-c", default="auto", type=click.Choice(["auto","bitcoin","ethereum"]))
 @with_provider
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
@@ -846,6 +1465,7 @@ def screen(address, chain, provider, provider_key, provider_url, agent, quiet):
       blockintql screen --address 1A1zP1e...
       blockintql screen --address 0x123... --provider trm --provider-key $KEY
     """
+    chain = infer_chain_from_value(address, fallback="bitcoin") if chain == "auto" else chain
     config = load_config()
     provider = provider or config.get("default_provider")
     if not quiet and not agent:
@@ -861,8 +1481,370 @@ def screen(address, chain, provider, provider_key, provider_url, agent, quiet):
 
     output(result, agent, quiet)
 
+
 @cli.command()
-@click.argument("query", required=False)
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def history(address_arg, address, chain, limit, agent, quiet):
+    """Fetch unified Ethereum wallet history (native + token transfers)."""
+    address = coalesce_address(address_arg, address)
+    if not address:
+        raise click.UsageError("Provide an address as an argument or with --address")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading {chain} history for {address[:20]}...[/]")
+    result = api_get(f"/v1/eth/address/{address}/history", {"limit": limit})
+    output(result, agent, quiet)
+
+
+@cli.command("tx")
+@click.option("--txid", "-t", required=True)
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def tx_lookup(txid, chain, agent, quiet):
+    """Fetch verbose Ethereum transaction details."""
+    if not str(txid).startswith("0x") or len(str(txid)) != 66:
+        raise click.UsageError("Ethereum transaction hashes must be passed as 0x-prefixed 66-character values.")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading {chain} transaction {txid[:20]}...[/]")
+    result = api_get(f"/v1/eth/tx/{txid}/verbose")
+    output(result, agent, quiet)
+
+
+@cli.group(cls=DefaultingGroup, invoke_without_command=True)
+@click.pass_context
+def stablecoins(ctx):
+    """Ethereum stablecoin analytics commands.
+
+    Examples:
+      blockintql stablecoins 0xabc...
+      blockintql stablecoins --address 0xabc...
+      blockintql stablecoins history 0xabc... --days 30
+      blockintql stablecoins counterparties 0xabc... --days 30
+      blockintql stablecoins flows --hours 24
+      blockintql stablecoins large-transfers --hours 24 --min-amount 1000000
+    """
+    if ctx.invoked_subcommand:
+        return
+    examples = [
+        "blockintql stablecoins 0xabc...",
+        "blockintql stablecoins --address 0xabc...",
+        "blockintql stablecoins balances 0xabc...",
+        "blockintql stablecoins history 0xabc... --days 30",
+        "blockintql stablecoins counterparties 0xabc... --days 30",
+        "blockintql stablecoins flows --hours 24",
+        "blockintql stablecoins large-transfers --hours 24 --min-amount 1000000",
+    ]
+    if not sys.stdout.isatty():
+        click.echo(json.dumps({
+            "group": "stablecoins",
+            "description": "Ethereum stablecoin analytics commands.",
+            "examples": examples,
+        }, indent=2))
+        return
+
+    console.print("[yellow]Choose a stablecoin command or pass an address to default to balances.[/]")
+    console.print("[dim]Examples:[/]")
+    for example in examples:
+        console.print(f"[dim]  {example}[/]")
+
+
+@cli.group()
+def chart():
+    """Render terminal-native charts for supported analytics endpoints."""
+
+
+@chart.command("stablecoin-flows")
+@click.option("--hours", default=24, show_default=True, type=int)
+@click.option("--interval", default="hour", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chart_stablecoin_flows(hours, interval, token, agent, quiet):
+    """Render a terminal chart for network stablecoin flow series."""
+    if not quiet and not agent:
+        console.print("[dim]Rendering stablecoin flow chart...[/]")
+    params = {"hours": hours, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get("/v1/eth/stablecoins/flows", params, timeout=180)
+    if agent or not sys.stdout.isatty() or "error" in result:
+        output(result, agent, quiet)
+        return
+    render_stablecoin_flow_chart(result, hours=hours, interval=interval, token=token)
+
+
+@chart.command("wallet-stablecoins")
+@click.argument("address")
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--interval", default="day", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chart_wallet_stablecoins(address, days, interval, token, agent, quiet):
+    """Render a terminal chart for wallet stablecoin history."""
+    if not quiet and not agent:
+        console.print(f"[dim]Rendering wallet stablecoin chart for {address[:20]}...[/]")
+    params = {"days": days, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params, timeout=90)
+    if agent or not sys.stdout.isatty() or "error" in result:
+        output(result, agent, quiet)
+        return
+    render_wallet_stablecoin_chart(result, address=address, days=days, token=token)
+
+
+@chart.command("wallet-stablecoin-balances")
+@click.argument("address")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chart_wallet_stablecoin_balances(address, agent, quiet):
+    """Render a terminal chart for current wallet stablecoin balances."""
+    if not quiet and not agent:
+        console.print(f"[dim]Rendering wallet stablecoin balances chart for {address[:20]}...[/]")
+    result = api_get(f"/v1/eth/address/{address}/stablecoins", timeout=90)
+    if agent or not sys.stdout.isatty() or "error" in result:
+        output(result, agent, quiet)
+        return
+    render_wallet_stablecoin_balances_chart(result, address=address)
+
+
+@chart.command("counterparties")
+@click.argument("address")
+@click.option("--token", default=None)
+@click.option("--direction", default="both", show_default=True, type=click.Choice(["inbound", "outbound", "both"]))
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chart_counterparties(address, token, direction, days, limit, agent, quiet):
+    """Render a terminal chart for stablecoin counterparties."""
+    if not quiet and not agent:
+        console.print(f"[dim]Rendering counterparty chart for {address[:20]}...[/]")
+    params = {"direction": direction, "days": days, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params, timeout=90)
+    if agent or not sys.stdout.isatty() or "error" in result:
+        output(result, agent, quiet)
+        return
+    render_counterparty_chart(result, address=address, token=token)
+
+
+@stablecoins.command("balances")
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_balances(address_arg, address, agent, quiet):
+    """Fetch major stablecoin balances for an Ethereum wallet."""
+    address = coalesce_address(address_arg, address)
+    if not address:
+        raise click.UsageError("Provide an address as an argument or with --address")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading stablecoin balances for {address[:20]}...[/]")
+    result = api_get(f"/v1/eth/address/{address}/stablecoins")
+    output(result, agent, quiet)
+
+
+@stablecoins.command("history")
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--interval", default="day", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_history(address_arg, address, days, interval, token, agent, quiet):
+    """Fetch time-bucketed stablecoin history for an Ethereum wallet."""
+    address = coalesce_address(address_arg, address)
+    if not address:
+        raise click.UsageError("Provide an address as an argument or with --address")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading stablecoin history for {address[:20]}...[/]")
+    params = {"days": days, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params)
+    output(result, agent, quiet)
+
+
+@stablecoins.command("counterparties")
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--token", default=None)
+@click.option("--direction", default="both", show_default=True, type=click.Choice(["inbound", "outbound", "both"]))
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_counterparties(address_arg, address, token, direction, days, limit, agent, quiet):
+    """Fetch top stablecoin counterparties for an Ethereum wallet."""
+    address = coalesce_address(address_arg, address)
+    if not address:
+        raise click.UsageError("Provide an address as an argument or with --address")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading stablecoin counterparties for {address[:20]}...[/]")
+    params = {"direction": direction, "days": days, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params)
+    output(result, agent, quiet)
+
+
+@stablecoins.command("flows")
+@click.option("--hours", default=24, show_default=True, type=int)
+@click.option("--interval", default="hour", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_flows(hours, interval, token, agent, quiet):
+    """Fetch network-level Ethereum stablecoin flow series."""
+    if not quiet and not agent:
+        console.print("[dim]Loading stablecoin flow series...[/]")
+    params = {"hours": hours, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get("/v1/eth/stablecoins/flows", params, timeout=180)
+    output(result, agent, quiet)
+
+
+@stablecoins.command("large-transfers")
+@click.option("--min-amount", default=100000, show_default=True, type=float)
+@click.option("--hours", default=24, show_default=True, type=int)
+@click.option("--token", default=None)
+@click.option("--limit", default=100, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_large_transfers(min_amount, hours, token, limit, agent, quiet):
+    """Fetch large Ethereum stablecoin transfers."""
+    if not quiet and not agent:
+        console.print("[dim]Loading large stablecoin transfers...[/]")
+    params = {"min_amount": min_amount, "hours": hours, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get("/v1/eth/stablecoins/large-transfers", params)
+    output(result, agent, quiet)
+
+
+@cli.group()
+def eth():
+    """Ethereum-first command namespace."""
+
+
+@eth.command("history")
+@click.argument("address")
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_history(address, limit, agent, quiet):
+    """Fetch unified Ethereum wallet history."""
+    result = api_get(f"/v1/eth/address/{address}/history", {"limit": limit})
+    output(result, agent, quiet)
+
+
+@eth.command("tx")
+@click.argument("txid")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_tx(txid, agent, quiet):
+    """Fetch verbose Ethereum transaction details."""
+    result = api_get(f"/v1/eth/tx/{txid}/verbose")
+    output(result, agent, quiet)
+
+
+@eth.command("verdict")
+@click.argument("address")
+@click.option("--context", default="")
+@with_provider
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_verdict(address, context, provider, provider_key, provider_url, agent, quiet):
+    """Get a verdict for an Ethereum address."""
+    result = api_post("/v1/verdict", {"address": address, "chain": "ethereum", "context": context})
+    if provider and "error" not in result:
+        result = enrich_with_provider(result, address, "ethereum", provider, provider_key, provider_url)
+    output(result, agent, quiet)
+
+
+@eth.command("screen")
+@click.argument("address")
+@with_provider
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_screen(address, provider, provider_key, provider_url, agent, quiet):
+    """Screen an Ethereum address."""
+    result = api_post("/v1/screen", {"address": address, "chain": "ethereum"})
+    if provider and "error" not in result:
+        result = enrich_with_provider(result, address, "ethereum", provider, provider_key, provider_url)
+    output(result, agent, quiet)
+
+
+@eth.group("stablecoins")
+def eth_stablecoins():
+    """Ethereum stablecoin analytics namespace."""
+
+
+@eth_stablecoins.command("balances")
+@click.argument("address")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_stablecoins_balances(address, agent, quiet):
+    result = api_get(f"/v1/eth/address/{address}/stablecoins")
+    output(result, agent, quiet)
+
+
+@eth_stablecoins.command("history")
+@click.argument("address")
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--interval", default="day", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_stablecoins_history(address, days, interval, token, agent, quiet):
+    params = {"days": days, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params)
+    output(result, agent, quiet)
+
+
+@eth_stablecoins.command("counterparties")
+@click.argument("address")
+@click.option("--token", default=None)
+@click.option("--direction", default="both", show_default=True, type=click.Choice(["inbound", "outbound", "both"]))
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_stablecoins_counterparties(address, token, direction, days, limit, agent, quiet):
+    params = {"direction": direction, "days": days, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params)
+    output(result, agent, quiet)
+
+
+@cli.command()
+@click.option("--surface", default="cli", type=click.Choice(["api", "cli", "mcp"]))
+@click.option("--category", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def capabilities(surface, category, agent, quiet):
+    """List discoverable capabilities and their CLI examples."""
+    params = {"surface": surface}
+    if category:
+        params["category"] = category
+    result = api_get("/v1/capabilities", params, require_auth=False)
+    output(result, agent, quiet)
+
+@cli.command()
+@click.argument("query", nargs=-1)
 @click.option("--address", "-a", multiple=True)
 @click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin","ethereum","both"]))
 @click.option("--format", "fmt", default="full", type=click.Choice(["full","graph","narrative"]))
@@ -870,12 +1852,13 @@ def screen(address, chain, provider, provider_key, provider_url, agent, quiet):
 @click.option("--quiet", "-q", is_flag=True)
 def analyze(query, address, chain, fmt, agent, quiet):
     """Run autonomous multi-agent analysis."""
-    if not query and not address:
+    query_text = " ".join(query).strip()
+    if not query_text and not address:
         raise click.UsageError("Provide a QUERY or --address")
     if not quiet and not agent:
         console.print("[dim]Running autonomous analysis...[/]")
-    result = api_post("/v1/analyze", {"query": query or "", "addresses": list(address),
-                                       "chain": chain, "output_format": fmt})
+    result = api_post("/v1/analyze", {"query": query_text, "addresses": list(address),
+                                       "chain": chain, "output_format": fmt}, timeout=180)
     output(result, agent, quiet)
 
 @cli.command()
@@ -906,30 +1889,97 @@ def trace(txid, hops, method, agent, quiet):
     output(result, agent, quiet)
 
 @cli.command()
-@click.argument("query")
+@click.argument("query", nargs=-1, required=True)
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def query(query, agent, quiet):
     """Natural language blockchain intelligence."""
+    query_text = " ".join(query).strip()
     if not quiet and not agent: console.print("[dim]Processing...[/]")
-    result = api_post("/v1/intelligence/search", {"query": query})
+    result = api_post("/v1/intelligence/search", {"query": query_text})
+    output(result, agent, quiet)
+
+
+@cli.command()
+@click.argument("message", nargs=-1, required=True)
+@click.option("--session-id", default=None, help="Continue an existing BlockINTQL chat session.")
+@click.option("--address", "-a", default=None, help="Optional address to anchor the chat turn.")
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin", "ethereum"]))
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chat(message, session_id, address, chain, agent, quiet):
+    """Scoped multi-turn compliance and blockchain forensics chat."""
+    message_text = " ".join(message).strip()
+    if not quiet and not agent:
+        console.print("[dim]Chatting with BlockINTQL...[/]")
+    payload = {"message": message_text, "chain": chain}
+    if session_id:
+        payload["session_id"] = session_id
+    if address:
+        payload["address"] = address
+    result = api_post("/v1/chat", payload, require_auth=True, timeout=120)
     output(result, agent, quiet)
 
 @cli.command()
-@click.argument("goal")
+@click.argument("goal", nargs=-1, required=True)
 @click.option("--address", "-a", default=None)
 @click.option("--workspace-id", default=None, help="Continue an existing workspace instead of starting fresh.")
 @click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin","ethereum"]))
 @click.option("--budget-credits", type=int, default=None)
 @click.option("--budget-usd", type=float, default=None)
 @click.option("--upto-budget-usd", type=float, default=None)
+@click.option("--mode", "execution_mode", type=click.Choice(["cheap", "standard", "deep"]), default=None, help="Choose which execution profile to plan around.")
 @click.option("--open-workspace", is_flag=True, help="Prefer workspace execution and open a workspace when possible.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-def ask(goal, address, workspace_id, chain, budget_credits, budget_usd, upto_budget_usd, open_workspace, agent, quiet):
+def ask(goal, address, workspace_id, chain, budget_credits, budget_usd, upto_budget_usd, execution_mode, open_workspace, agent, quiet):
     """Plan an investigation and optionally open a workspace."""
+    goal_text = " ".join(goal).strip()
     if not quiet and not agent:
         console.print("[dim]Planning investigation...[/]")
+    run_ask_flow(
+        goal_text,
+        address=address,
+        workspace_id=workspace_id,
+        chain=chain,
+        budget_credits=budget_credits,
+        budget_usd=budget_usd,
+        upto_budget_usd=upto_budget_usd,
+        open_workspace=open_workspace,
+        mode=execution_mode,
+        agent=agent,
+        quiet=quiet,
+    )
+
+
+@cli.group()
+def prediction():
+    """Prediction-market investigation commands."""
+
+
+@prediction.group()
+def market():
+    """Prediction-market workflows for Ethereum investigations."""
+
+
+@market.command("analysis")
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--workspace-id", default=None, help="Continue an existing workspace instead of starting fresh.")
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--budget-credits", type=int, default=None)
+@click.option("--budget-usd", type=float, default=None)
+@click.option("--upto-budget-usd", type=float, default=None)
+@click.option("--mode", "execution_mode", type=click.Choice(["cheap", "standard", "deep"]), default=None, help="Choose which execution profile to plan around.")
+@click.option("--open-workspace/--plan-only", default=True, show_default=True, help="Open the recommended workspace for deeper prediction-market analysis.")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def prediction_market_analysis(address_arg, address, workspace_id, chain, budget_credits, budget_usd, upto_budget_usd, execution_mode, open_workspace, agent, quiet):
+    """Plan or open a prediction-market investigation workflow."""
+    address = coalesce_address(address_arg, address)
+    if not quiet and not agent:
+        console.print("[dim]Planning prediction-market investigation...[/]")
+    goal = "Investigate prediction market exposure, counterparties, venue interactions, and event-driven flows"
     run_ask_flow(
         goal,
         address=address,
@@ -939,6 +1989,7 @@ def ask(goal, address, workspace_id, chain, budget_credits, budget_usd, upto_bud
         budget_usd=budget_usd,
         upto_budget_usd=upto_budget_usd,
         open_workspace=open_workspace,
+        mode=execution_mode,
         agent=agent,
         quiet=quiet,
     )
@@ -971,7 +2022,7 @@ def skills(install, agent):
         return
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps({
-            "commands": ["verdict","screen","analyze","profile","trace","query","ask","providers","status"],
+            "commands": ["verdict","screen","history","tx","eth","stablecoins","chart","prediction","analyze","profile","trace","query","chat","ask","workspace","wallet","capabilities","providers","status","admin"],
             "providers": [p["name"] for p in list_providers()],
             "privacy": "Provider keys never leave your machine",
             "mcp_server": "https://blockintql-mcp-385334043904.us-central1.run.app/mcp",
@@ -985,11 +2036,21 @@ def skills(install, agent):
     rows = [
         ("verdict","CLEAR/CAUTION/BLOCK","blockintql verdict --address 1ABC..."),
         ("screen","Screen + provider","blockintql screen --address 0x123... --provider trm --provider-key $KEY"),
+        ("history","Ethereum wallet history","blockintql history --address 0x123..."),
+        ("tx","Verbose Ethereum tx","blockintql tx --txid 0xabc..."),
+        ("eth","Ethereum-first namespace","blockintql eth stablecoins history 0x123..."),
+        ("stablecoins","Ethereum stablecoin analytics","blockintql stablecoins history --address 0x123..."),
+        ("chart","Terminal-native charts","blockintql chart wallet-stablecoin-balances 0x123..."),
+        ("prediction","Prediction-market workflow","blockintql prediction market analysis 0x123..."),
         ("analyze","Multi-agent analysis",'blockintql analyze "check for sanctions"'),
         ("profile","OP_RETURN identity","blockintql profile --identifier @handle"),
         ("trace","FIFO/LIFO tracing","blockintql trace --txid abc123..."),
         ("query","Natural language",'blockintql query "is this safe?"'),
         ("ask","Plan or open workspace",'blockintql ask "Investigate this wallet" --address 0x123...'),
+        ("workspace","Manage workspaces","blockintql workspace review <workspace_id>"),
+        ("wallet","Wallet-backed access","blockintql wallet status"),
+        ("capabilities","Discover supported commands","blockintql capabilities --category stablecoins"),
+        ("chat","Scoped compliance + blockchain forensics conversation","blockintql chat \"Explain the sanctions risk for 0x...\" --address 0x..."),
         ("providers","List providers","blockintql providers"),
         ("skills","Agent skills","blockintql skills --install >> CONTEXT.md"),
     ]
@@ -999,25 +2060,140 @@ def skills(install, agent):
     console.print("[dim]Source: github.com/block6iq/blockintql-cli[/]")
 
 @cli.command()
-@click.option("--wallet-type", default="cdp", type=click.Choice(["cdp","privatekey"]))
 @click.option("--cdp-key-id", default=None, envvar="BLOCKINTQL_CDP_KEY_ID")
-@click.option("--cdp-private-key", default=None, envvar="BLOCKINTQL_CDP_PRIVATE_KEY")
-@click.option("--private-key", default=None, envvar="BLOCKINTQL_PRIVATE_KEY")
 @click.option("--auto-pay", is_flag=True)
 @click.option("--max-payment", default=0.10)
-def pay(wallet_type, cdp_key_id, cdp_private_key, private_key, auto_pay, max_payment):
-    """Store local payment preferences for wallet-based billing flows."""
+def pay(cdp_key_id, auto_pay, max_payment):
+    """Store local payment preferences for wallet-backed billing flows."""
     config = load_config()
-    payment_config = {"type": wallet_type, "auto_pay": auto_pay, "max_payment_usd": max_payment}
-    if wallet_type == "cdp":
-        payment_config["cdp_key_id"] = cdp_key_id or os.environ.get("BLOCKINTQL_CDP_KEY_ID")
-    elif wallet_type == "privatekey":
-        payment_config["private_key_env"] = "BLOCKINTQL_PRIVATE_KEY"
+    payment_config = {"type": "cdp", "auto_pay": auto_pay, "max_payment_usd": max_payment}
+    payment_config["cdp_key_id"] = cdp_key_id or os.environ.get("BLOCKINTQL_CDP_KEY_ID")
+    payment_config["private_key_env"] = "BLOCKINTQL_CDP_PRIVATE_KEY"
     config["payment"] = payment_config
     save_config(config)
-    console.print(f"[green]Saved local payment preferences ({wallet_type}).[/]")
+    console.print("[green]Saved local payment preferences (wallet session).[/]")
     console.print(f"[green]Auto-pay preference: {'enabled' if auto_pay else 'disabled'} | Max: ${max_payment}[/]")
-    console.print("[dim]Sensitive wallet keys are not persisted by this command. Keep them in environment variables.[/]")
+    console.print("[dim]Wallet secrets are not persisted by this command. Keep them in your wallet session manager or environment.[/]")
+
+
+@cli.group()
+def wallet():
+    """Connect and inspect wallet-backed payment access."""
+
+
+def _configure_cdp_wallet(auto_pay, max_payment, cdp_key_id, agent, *, command_name="wallet connect"):
+    if cdp_key_id:
+        os.environ["BLOCKINTQL_CDP_KEY_ID"] = cdp_key_id
+
+    configured_key_id = cdp_key_id or os.environ.get("BLOCKINTQL_CDP_KEY_ID")
+    configured_private_key = os.environ.get("BLOCKINTQL_CDP_PRIVATE_KEY")
+    if not configured_key_id or not configured_private_key:
+        message = {
+            "error": "No wallet session credentials found for CDP mode.",
+            "next_step": "Set BLOCKINTQL_CDP_KEY_ID and BLOCKINTQL_CDP_PRIVATE_KEY, then rerun login.",
+            "example": "export BLOCKINTQL_CDP_KEY_ID='...'; export BLOCKINTQL_CDP_PRIVATE_KEY='-----BEGIN ...'",
+        }
+        if agent or not sys.stdout.isatty():
+            click.echo(json.dumps(message, indent=2))
+        else:
+            err_console.print("[red]No wallet session credentials found for CDP mode.[/]")
+            console.print("[dim]Next step:[/] export BLOCKINTQL_CDP_KEY_ID='...'")
+            console.print("[dim]            export BLOCKINTQL_CDP_PRIVATE_KEY='-----BEGIN ...'")
+            console.print(f"[dim]Then run:[/] blockintql {command_name} --auto-pay --max-payment 0.10")
+        return False
+
+    config = load_config()
+    payment_config = {
+        "type": "cdp",
+        "auto_pay": auto_pay,
+        "max_payment_usd": max_payment,
+        "cdp_key_id": configured_key_id,
+        "private_key_env": "BLOCKINTQL_CDP_PRIVATE_KEY",
+    }
+    config["payment"] = payment_config
+    save_config(config)
+
+    result = {
+        "wallet_type": "cdp",
+        "auto_pay": auto_pay,
+        "max_payment_usd": max_payment,
+        "api_key_required": False,
+        "ready": True,
+        "next": [
+            "unset BLOCKINTQL_API_KEY",
+            "blockintql verdict --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --agent",
+        ],
+    }
+    if agent or not sys.stdout.isatty():
+        click.echo(json.dumps(result, indent=2))
+        return True
+    console.print("[green]Wallet connected for x402 access (cdp).[/]")
+    console.print(f"[green]Auto-pay: {'enabled' if auto_pay else 'disabled'} | Max payment: ${max_payment}[/]")
+    console.print("[dim]No API key is required for wallet-backed x402 requests.[/]")
+    console.print("[dim]Next:[/] unset BLOCKINTQL_API_KEY")
+    console.print("[dim]Try:[/] blockintql verdict --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --agent")
+    return True
+
+
+@cli.command("login")
+@click.option("--auto-pay", is_flag=True, default=True)
+@click.option("--max-payment", default=0.10, show_default=True, type=float)
+@click.option("--cdp-key-id", default=None, envvar="BLOCKINTQL_CDP_KEY_ID")
+@click.option("--agent", is_flag=True)
+def login(auto_pay, max_payment, cdp_key_id, agent):
+    """Connect a wallet session for no-key x402 access."""
+    _configure_cdp_wallet(auto_pay, max_payment, cdp_key_id, agent, command_name="login")
+
+
+@wallet.command("connect")
+@click.option("--auto-pay", is_flag=True, default=True)
+@click.option("--max-payment", default=0.10, show_default=True, type=float)
+@click.option("--cdp-key-id", default=None, envvar="BLOCKINTQL_CDP_KEY_ID")
+@click.option("--agent", is_flag=True)
+def wallet_connect(auto_pay, max_payment, cdp_key_id, agent):
+    """Configure wallet-based access so x402 requests can run with no API key."""
+    _configure_cdp_wallet(auto_pay, max_payment, cdp_key_id, agent)
+
+
+@wallet.command("status")
+@click.option("--agent", is_flag=True)
+def wallet_status(agent):
+    """Show current wallet-based payment readiness."""
+    config = load_config()
+    payment_config = load_payment_config(config)
+    if not payment_config:
+        payload = {"ready": False, "configured": False, "message": "No wallet payment configuration found."}
+        if agent or not sys.stdout.isatty():
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            console.print("[yellow]No wallet payment configuration found.[/]")
+            console.print("[dim]Run:[/] blockintql login --auto-pay --max-payment 0.10")
+        return
+
+    env_names = [payment_config.private_key_env]
+    if payment_config.wallet_type == "cdp":
+        env_names = ["BLOCKINTQL_CDP_PRIVATE_KEY"]
+    ready = any(os.environ.get(name) for name in env_names) and bool(
+        payment_config.cdp_key_id or os.environ.get("BLOCKINTQL_CDP_KEY_ID")
+    )
+    payload = {
+        "configured": True,
+        "ready": ready,
+        "wallet_type": payment_config.wallet_type,
+        "auto_pay": payment_config.auto_pay,
+        "max_payment_usd": payment_config.max_payment_usd,
+        "private_key_env": payment_config.private_key_env,
+        "api_key_required": False,
+    }
+    if agent or not sys.stdout.isatty():
+        click.echo(json.dumps(payload, indent=2))
+        return
+    if ready:
+        console.print(f"[green]Wallet access is ready ({payment_config.wallet_type}).[/]")
+    else:
+        console.print(f"[yellow]Wallet config exists but the shell is missing {payment_config.private_key_env}.[/]")
+    console.print(f"[dim]Auto-pay:[/] {'enabled' if payment_config.auto_pay else 'disabled'}")
+    console.print(f"[dim]Max payment:[/] ${payment_config.max_payment_usd}")
 
 @cli.command()
 @click.option("--agent", is_flag=True)
@@ -1077,6 +2253,23 @@ def buy(email, pack, agent):
 @cli.group()
 def workspace():
     """Manage investigation workspaces."""
+
+
+@cli.group()
+def admin():
+    """Operator and audit commands."""
+
+
+@admin.command("vm-audit")
+@click.option("--limit", default=25, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def admin_vm_audit(limit, agent, quiet):
+    """Inspect active Ubicloud VMs, cleanup state, and recent refunds."""
+    if not quiet and not agent:
+        console.print("[dim]Fetching VM audit view...[/]")
+    result = admin_api_get("/v1/admin/audit/vms", params={"limit": limit})
+    output(result, agent, quiet)
 
 
 @workspace.command("create")

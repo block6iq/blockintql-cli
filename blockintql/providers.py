@@ -2,6 +2,140 @@
 
 import httpx
 from abc import ABC, abstractmethod
+from typing import Iterable
+
+
+def _text_set(values: Iterable) -> set[str]:
+    items = set()
+    for value in values or []:
+        text = str(value or "").strip().lower()
+        if text:
+            items.add(text)
+    return items
+
+
+CANONICAL_PROVIDER_RULES = [
+    {
+        "category": "sanctions",
+        "recommended_verdict": "BLOCK",
+        "severity": "critical",
+        "label_tokens": {"sanction", "sanctions", "ofac", "sdn", "blocked"},
+    },
+    {
+        "category": "mixer",
+        "recommended_verdict": "CAUTION",
+        "severity": "high",
+        "label_tokens": {"mixer", "mixing", "tumbler", "coinjoin", "tornado cash"},
+    },
+    {
+        "category": "ransomware",
+        "recommended_verdict": "BLOCK",
+        "severity": "critical",
+        "label_tokens": {"ransomware", "extortion"},
+    },
+    {
+        "category": "darknet",
+        "recommended_verdict": "BLOCK",
+        "severity": "critical",
+        "label_tokens": {"darknet", "dark market", "darknet market"},
+    },
+    {
+        "category": "scam",
+        "recommended_verdict": "BLOCK",
+        "severity": "critical",
+        "label_tokens": {"scam", "fraud", "phishing", "drainer", "hack", "exploit"},
+    },
+    {
+        "category": "gambling",
+        "recommended_verdict": "CAUTION",
+        "severity": "medium",
+        "label_tokens": {"gambling", "casino", "betting"},
+    },
+    {
+        "category": "exchange",
+        "recommended_verdict": "CLEAR",
+        "severity": "low",
+        "label_tokens": {"exchange", "cex"},
+    },
+    {
+        "category": "defi",
+        "recommended_verdict": "CLEAR",
+        "severity": "low",
+        "label_tokens": {"defi", "dex", "amm", "protocol"},
+    },
+    {
+        "category": "bridge",
+        "recommended_verdict": "CAUTION",
+        "severity": "medium",
+        "label_tokens": {"bridge", "cross-chain"},
+    },
+    {
+        "category": "wallet",
+        "recommended_verdict": "CLEAR",
+        "severity": "low",
+        "label_tokens": {"wallet", "eoa", "externally_owned_account"},
+    },
+]
+
+
+def adjudicate_provider_result(result: dict) -> dict:
+    """
+    Convert vendor-native labels into BlockINTQL canonical local policy.
+
+    This is intentionally deterministic and conservative:
+    - direct sanctions hits always BLOCK
+    - mapped high-risk illicit categories become BLOCK or CAUTION
+    - unmapped/high-score vendor data degrades to UNKNOWN or CAUTION
+    """
+    indicators = _text_set(result.get("risk_indicators"))
+    entity_category = str(result.get("entity_category") or "").strip().lower()
+    haystack = " ".join(sorted(indicators | ({entity_category} if entity_category else set())))
+    reasons = []
+
+    if result.get("sanctions_hit"):
+        return {
+            "canonical_category": "sanctions",
+            "recommended_verdict": "BLOCK",
+            "severity": "critical",
+            "confidence": "high",
+            "reasons": ["Provider reported a direct sanctions hit."],
+        }
+
+    for rule in CANONICAL_PROVIDER_RULES:
+        if any(token in haystack for token in rule["label_tokens"]):
+            reasons.append(f"Matched provider category tokens for {rule['category']}.")
+            return {
+                "canonical_category": rule["category"],
+                "recommended_verdict": rule["recommended_verdict"],
+                "severity": rule["severity"],
+                "confidence": "medium",
+                "reasons": reasons,
+            }
+
+    risk_score = float(result.get("risk_score") or 0)
+    if risk_score >= 85:
+        return {
+            "canonical_category": "unknown_high_risk",
+            "recommended_verdict": "CAUTION",
+            "severity": "high",
+            "confidence": "low",
+            "reasons": ["Provider returned a high risk score but the category schema could not be mapped safely."],
+        }
+    if risk_score >= 40:
+        return {
+            "canonical_category": "unknown_review",
+            "recommended_verdict": "UNKNOWN",
+            "severity": "medium",
+            "confidence": "low",
+            "reasons": ["Provider returned elevated risk without a canonical category mapping."],
+        }
+    return {
+        "canonical_category": "unknown_low_risk",
+        "recommended_verdict": "CLEAR",
+        "severity": "low",
+        "confidence": "low",
+        "reasons": ["No mapped high-risk provider category or confirmed sanctions evidence was found."],
+    }
 
 
 class AttributionProvider(ABC):
@@ -15,6 +149,10 @@ class AttributionProvider(ABC):
     def normalize(self, raw: dict) -> dict:
         return {"entity_name": None, "entity_category": None, "risk_score": 0,
                 "risk_indicators": [], "sanctions_hit": False, "provider": self.name, "raw": raw}
+
+    @property
+    def requires_api_key(self) -> bool:
+        return True
 
 
 class ChainalysisProvider(AttributionProvider):
@@ -118,6 +256,11 @@ class MetaMaskRiskProvider(AttributionProvider):
     description = "MetaMask Transaction Insight — free, no API key needed"
     def __init__(self, api_key: str = ""):
         self.api_key = api_key
+
+    @property
+    def requires_api_key(self) -> bool:
+        return False
+
     def get_address_risk(self, address: str, chain: str = "ethereum") -> dict:
         if chain != "ethereum":
             return self.normalize({"error": "MetaMask only supports Ethereum"})
@@ -133,22 +276,6 @@ class MetaMaskRiskProvider(AttributionProvider):
             return result
         except Exception as e:
             return self.normalize({"error": str(e)})
-
-
-PROVIDERS = {
-    "chainalysis": ChainalysisProvider,
-    "trm": TRMProvider,
-    "elliptic": EllipticProvider,
-    "arkham": ArkhamProvider,
-    "metamask": MetaMaskRiskProvider,
-}
-
-def get_provider(name: str, api_key: str):
-    cls = PROVIDERS.get(name.lower())
-    return cls(api_key) if cls else None
-
-def list_providers() -> list:
-    return [{"name": k, "description": v.description} for k, v in PROVIDERS.items()]
 
 
 class GenericProvider(AttributionProvider):
@@ -176,6 +303,10 @@ class GenericProvider(AttributionProvider):
         self.entity_field = entity_field
         self.auth_header = auth_header
         self.auth_prefix = auth_prefix
+
+    @property
+    def requires_api_key(self) -> bool:
+        return False
 
     def get_address_risk(self, address: str, chain: str = "bitcoin") -> dict:
         if not self.url_template:
@@ -213,7 +344,23 @@ class GenericProvider(AttributionProvider):
 
 
 # Add generic to registry
-PROVIDERS["generic"] = GenericProvider
+PROVIDERS = {
+    "chainalysis": ChainalysisProvider,
+    "trm": TRMProvider,
+    "elliptic": EllipticProvider,
+    "arkham": ArkhamProvider,
+    "metamask": MetaMaskRiskProvider,
+    "generic": GenericProvider,
+}
+
+
+def get_provider(name: str, api_key: str = "", **kwargs):
+    cls = PROVIDERS.get(name.lower())
+    return cls(api_key, **kwargs) if cls else None
+
+
+def list_providers() -> list:
+    return [{"name": k, "description": v.description} for k, v in PROVIDERS.items()]
 
 # ── PRIVACY GUARANTEE ─────────────────────────────────────────────────────────
 #

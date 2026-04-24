@@ -54,6 +54,8 @@ By installing, downloading, or running BlockINTQL, you confirm you have read thi
 pip install blockintql
 ```
 
+For wallet-backed keyless x402 payments, use Python 3.10+ so the official `x402` buyer SDK can be installed.
+
 From a source checkout:
 
 ```bash
@@ -68,9 +70,12 @@ Set your API key with either an environment variable or the local config file:
 ```bash
 export BLOCKINTQL_API_KEY=biq_sk_live_...
 blockintql auth --api-key biq_sk_live_...
+blockintql status
 ```
 
 `blockintql auth` stores the BlockINTQL API key and an optional default provider name in `~/.blockintql/config.json` with `0600` permissions. Keep provider keys and wallet secrets in environment variables instead of the config file.
+
+For keyless pay-per-request access, configure wallet-backed payments locally instead of setting an API key.
 
 ## Usage
 
@@ -93,6 +98,30 @@ blockintql verdict --address 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa \
 
 # Natural language intelligence
 blockintql query "is this address linked to Lazarus Group?"
+
+# Plan an investigation and open a recommended workspace
+blockintql ask "Open a deeper stablecoin investigation workspace for this wallet" \
+  --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 \
+  --budget-credits 12 \
+  --open-workspace
+
+# Prediction-market investigation workflow
+blockintql prediction market analysis 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+
+# Stablecoin flow and holdings charts
+blockintql chart stablecoin-flows --hours 24
+blockintql chart wallet-stablecoin-balances 0x7713974908be4bed47172370115e8b1219f4a5f0
+
+# Review the current state of an investigation workspace
+blockintql workspace review <workspace_id>
+
+# Inspect the recent ask / planner / outcome thread
+blockintql workspace conversation <workspace_id> --limit 5
+
+# Continue the same case with a follow-up ask
+blockintql workspace chat <workspace_id> \
+  "Go deeper on counterparties and bridge exposure" \
+  --open-workspace
 
 # Multi-address analysis
 blockintql analyze "check if these wallets transacted with each other" \
@@ -123,9 +152,50 @@ if [ "$SAFE" = "false" ]; then
 fi
 ```
 
+For account verification or workspace automation in scripts:
+
+```bash
+blockintql status --agent | jq
+
+blockintql ask "Investigate this wallet's stablecoin counterparties" \
+  --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 \
+  --budget-credits 12 \
+  --open-workspace \
+  --agent | jq
+```
+
 ## Provider Enrichment
 
 Provider calls are made directly from the CLI on your machine. BlockINTQL receives the address and chain only.
+
+Provider privacy model:
+
+- Provider API keys are used only in direct CLI-to-provider HTTP calls.
+- Raw provider responses stay in local process memory and are not sent to BlockINTQL.
+- BlockINTQL only receives the native BlockINTQL request payload, such as `address`, `chain`, and optional BlockINTQL-native context.
+- The CLI only prints an allowlisted provider summary:
+  - `provider`
+  - `entity_name`
+  - `entity_category`
+  - `risk_score`
+  - `risk_indicators`
+  - `sanctions_hit`
+  - `canonical_category`
+  - `recommended_verdict`
+  - `severity`
+  - `confidence`
+- You can verify this in the open-source source code:
+  - `/blockintql/providers.py`
+  - `/blockintql/cli.py`
+  - `/tests/test_cli.py`
+
+Provider adjudication model:
+
+- Vendor-native categories are normalized locally into BlockINTQL canonical classes such as `sanctions`, `mixer`, `ransomware`, `darknet`, `scam`, `exchange`, `defi`, `bridge`, and conservative `unknown_*` buckets.
+- Direct sanctions hits become local `BLOCK`.
+- Mapped elevated-risk categories become local `CAUTION` or `BLOCK` based on deterministic policy.
+- Unmapped or proprietary vendor categories do not silently produce `CLEAR`; they degrade to conservative `UNKNOWN` or `CAUTION` policy locally.
+- This normalization happens in the CLI before terminal output and without sending vendor payloads to BlockINTQL.
 
 Available providers:
 
@@ -151,7 +221,7 @@ blockintql screen --address 1ABC... \
 
 ## Payment Preferences
 
-`blockintql pay` stores local billing preferences only. It does not execute wallet payments by itself in this repository.
+`blockintql pay` stores local wallet-backed payment settings for pay-per-request access. When no API key is present, paid CLI requests use the standard x402 buyer flow automatically.
 
 ```bash
 blockintql pay --wallet-type cdp --auto-pay --max-payment 0.10
@@ -163,7 +233,10 @@ Use environment variables for any wallet secrets:
 export BLOCKINTQL_CDP_KEY_ID=...
 export BLOCKINTQL_CDP_PRIVATE_KEY=...
 export BLOCKINTQL_PRIVATE_KEY=...
+export EVM_PRIVATE_KEY=...
 ```
+
+For agent-mode keyless payments, the CLI uses the standard EVM private-key signer path. `BLOCKINTQL_PRIVATE_KEY` and `EVM_PRIVATE_KEY` are both supported.
 
 ## LangChain
 
