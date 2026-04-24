@@ -57,7 +57,12 @@ class VerdictTool(BlockINTQLBaseTool):
     )
     args_schema: Type[BaseModel] = VerdictInput
 
-    def _run(self, address: str, chain: str = "bitcoin", run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
+    def _run(
+        self,
+        address: str,
+        chain: str = "bitcoin",
+        run_manager: Optional[CallbackManagerForToolRun] = None,
+    ) -> str:
         return json.dumps(self._api_post("/v1/verdict", {"address": address, "chain": chain}), indent=2)
 
 
@@ -74,7 +79,12 @@ class ScreenTool(BlockINTQLBaseTool):
     )
     args_schema: Type[BaseModel] = ScreenInput
 
-    def _run(self, address: str, chain: str = "bitcoin", run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
+    def _run(
+        self,
+        address: str,
+        chain: str = "bitcoin",
+        run_manager: Optional[CallbackManagerForToolRun] = None,
+    ) -> str:
         return json.dumps(self._api_post("/v1/screen", {"address": address, "chain": chain}), indent=2)
 
 
@@ -151,7 +161,11 @@ class QueryTool(BlockINTQLBaseTool):
     description: str = "Ask a natural-language blockchain intelligence question."
     args_schema: Type[BaseModel] = QueryInput
 
-    def _run(self, query: str, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
+    def _run(
+        self,
+        query: str,
+        run_manager: Optional[CallbackManagerForToolRun] = None,
+    ) -> str:
         return json.dumps(self._api_post("/v1/intelligence/search", {"query": query}), indent=2)
 
 

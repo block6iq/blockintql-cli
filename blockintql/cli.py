@@ -10,7 +10,7 @@ PRIVACY ARCHITECTURE:
 Verify this by reading the source. Open source: github.com/block6iq/blockintql-cli
 """
 
-import sys, os, json
+import sys, os, json, base64
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 import click
@@ -19,30 +19,50 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 from . import __version__
-from .providers import get_provider, list_providers
+from .payments import (
+    PaymentError,
+    enforce_payment_policy,
+    ensure_wallet_runtime_ready,
+    load_payment_config,
+)
+from .providers import adjudicate_provider_result, get_provider, list_providers
+from .x402_runtime import request_with_x402
 
+# ── BANNER ────────────────────────────────────────────────────────────────────
 BLOCKINTQL_BANNER = """
-[bold green]██████╗ ██╗      ██████╗  ██████╗██╗  ██╗██╗███╗   ██╗████████╗ ██████╗ ██╗     [/bold green]
-[bold green]██╔══██╗██║     ██╔═══██╗██╔════╝██║ ██╔╝██║████╗  ██║╚══██╔══╝██╔═══██╗██║     [/bold green]
-[bold green]██████╔╝██║     ██║   ██║██║     █████╔╝ ██║██╔██╗ ██║   ██║   ██║   ██║██║     [/bold green]
-[bold green]██╔══██╗██║     ██║   ██║██║     ██╔═██╗ ██║██║╚██╗██║   ██║   ██║▄▄ ██║██║     [/bold green]
-[bold green]██████╔╝███████╗╚██████╔╝╚██████╗██║  ██╗██║██║ ╚████║   ██║   ╚██████╔╝███████╗[/bold green]
-[bold green]╚═════╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝   ╚═╝    ╚══▀▀═╝ ╚══════╝[/bold green]
-[dim]  BlockINTQL · blockintql.com[/dim]
+[bold white]██████╗ ██╗      ██████╗  ██████╗██╗  ██╗██╗███╗   ██╗████████╗ ██████╗ ██╗     [/bold white]
+[bold white]██╔══██╗██║     ██╔═══██╗██╔════╝██║ ██╔╝██║████╗  ██║╚══██╔══╝██╔═══██╗██║     [/bold white]
+[bold white]██████╔╝██║     ██║   ██║██║     █████╔╝ ██║██╔██╗ ██║   ██║   ██║   ██║██║     [/bold white]
+[bold white]██╔══██╗██║     ██║   ██║██║     ██╔═██╗ ██║██║╚██╗██║   ██║   ██║▄▄ ██║██║     [/bold white]
+[bold white]██████╔╝███████╗╚██████╔╝╚██████╗██║  ██╗██║██║ ╚████║   ██║   ╚██████╔╝███████╗[/bold white]
+[bold white]╚═════╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝   ╚═╝    ╚══▀▀═╝ ╚══════╝[/bold white]
+[dim]  Sovereign Blockchain Intelligence · blockintql.com[/dim]
 """
 
-API_BASE = os.environ.get("BLOCKINTQL_API_URL", "https://btc-index-api-385334043904.us-central1.run.app")
+DEFAULT_API_BASE = "https://blockintql.com"
+DIRECT_API_BASE = "https://btc-index-api-385334043904.us-central1.run.app"
+API_BASE = os.environ.get("BLOCKINTQL_API_URL", DEFAULT_API_BASE)
 CONFIG_FILE = os.path.expanduser("~/.blockintql/config.json")
+PAYMENT_RESPONSE_HEADER_CANDIDATES = ("PAYMENT-RESPONSE", "payment-response")
 console = Console()
 err_console = Console(stderr=True)
 
 
+class DefaultingGroup(click.Group):
+    default_command_name = "balances"
+
+    def parse_args(self, ctx, args):
+        commands = set(self.list_commands(ctx))
+        if args:
+            first = args[0]
+            if first in {"--address", "-a"} or (not first.startswith("-") and first not in commands):
+                args.insert(0, self.default_command_name)
+        return super().parse_args(ctx, args)
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
+        with open(CONFIG_FILE) as f: return json.load(f)
     return {}
-
 
 def save_config(config):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
@@ -50,123 +70,249 @@ def save_config(config):
         json.dump(config, f, indent=2)
     Path(CONFIG_FILE).chmod(0o600)
 
-
 def get_api_key():
     return os.environ.get("BLOCKINTQL_API_KEY") or load_config().get("api_key")
 
 
+def get_admin_key():
+    return os.environ.get("BLOCKINTQL_ADMIN_KEY") or load_config().get("admin_api_key")
+
+
+def infer_chain_from_value(value, fallback="bitcoin"):
+    text = str(value or "").strip()
+    if text.startswith("0x") and len(text) == 42:
+        return "ethereum"
+    if text.startswith(("bc1", "1", "3")):
+        return "bitcoin"
+    if text.startswith("T") and len(text) == 34:
+        return "tron"
+    if text.startswith(("L", "M")):
+        return "litecoin"
+    return fallback
+
+
+def coalesce_address(argument_value=None, option_value=None):
+    return option_value or argument_value
+
 def get_headers():
     key = get_api_key()
     if not key:
-        err_console.print("[red]No API key.[/] Run: blockintql auth  or set BLOCKINTQL_API_KEY env var")
+        err_console.print("[red]No API key.[/] Run: blockintql auth --api-key YOUR_KEY")
         sys.exit(1)
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
-def get_optional_headers():
-    key = get_api_key()
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    return headers
+def get_admin_headers():
+    key = get_admin_key()
+    if not key:
+        err_console.print("[red]No admin key.[/] Set BLOCKINTQL_ADMIN_KEY or save admin_api_key in config.")
+        sys.exit(1)
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
-def api_get(path, params=None, require_auth=True):
-    try:
-        headers = get_headers() if require_auth else get_optional_headers()
-        r = httpx.get(f"{API_BASE}{path}", headers=headers, params=params, timeout=30)
-        data = r.json() if r.text else {}
-        if r.status_code >= 400:
-            return format_api_error(r, data)
-        return data
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def fetch_credits():
-    """Fetch current credit balance."""
-    try:
-        key = get_api_key()
-        if not key:
-            return None
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        r = httpx.get(f"{API_BASE}/v1/me", headers=headers, timeout=5)
-        if r.status_code == 200:
-            return r.json().get("credits", 0)
-    except:
-        pass
+def _extract_payment_response(response):
+    for header_name in PAYMENT_RESPONSE_HEADER_CANDIDATES:
+        header_value = response.headers.get(header_name)
+        if not header_value:
+            continue
+        try:
+            return json.loads(base64.b64decode(header_value).decode("utf-8"))
+        except Exception:
+            try:
+                return json.loads(header_value)
+            except Exception:
+                return {"raw": header_value}
     return None
 
-CREDIT_COSTS = {
-    "verdict": 2, "screen": 2, "profile": 2, "trace": 2, "ens": 2,
-    "graphs": 5, "analyze": 10, "query": 10, "flows": 10,
-    "investigations": 20, "signals": 5, "exposure": 5, "opreturn-search": 5, "opreturn-stats": 2,
-}
 
-def show_credit_cost(command_name):
-    """Show credit cost before a command runs."""
-    cost = CREDIT_COSTS.get(command_name, 1)
-    credits = fetch_credits()
-    if credits is not None:
-        console.print(f"  [dim]cost: {cost} credit{'s' if cost != 1 else ''} · balance: {credits:,} credits[/dim]")
-        if credits < cost:
-            console.print(f"  [dim]credits may be low — proceeding anyway[/dim]")
-    return True
+def _api_base_candidates():
+    bases = [API_BASE]
+    if API_BASE.rstrip("/") == DEFAULT_API_BASE.rstrip("/") and DIRECT_API_BASE not in bases:
+        bases.append(DIRECT_API_BASE)
+    return bases
 
-def show_credit_after(command_name):
-    """Show remaining balance after a command."""
-    credits = fetch_credits()
-    if credits is not None:
-        console.print(f"  [dim]remaining: {credits:,} credits[/dim]")
 
-def api_post(path, body, require_auth=True):
+def _should_retry_direct_from_response(response):
+    return int(getattr(response, "status_code", 0) or 0) in {502, 503, 504, 520, 522, 524}
+
+
+def _should_retry_direct_from_exception(exc):
+    if isinstance(exc, httpx.ReadTimeout):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return int(exc.response.status_code or 0) in {502, 503, 504, 520, 522, 524}
+    return False
+
+
+def _attach_payment_metadata(payload, metadata):
+    if not metadata:
+        return payload
+    if isinstance(payload, dict):
+        enriched = dict(payload)
+        enriched["payment"] = metadata
+        return enriched
+    return {"result": payload, "payment": metadata}
+
+
+def _response_error_message(response):
     try:
-        headers = get_headers() if require_auth else get_optional_headers()
-        r = httpx.post(f"{API_BASE}{path}", headers=headers, json=body, timeout=60)
-        data = r.json() if r.text else {}
-        if r.status_code >= 400:
-            return format_api_error(r, data)
-        return data
+        payload = response.json()
+        if isinstance(payload, dict) and payload.get("error"):
+            return payload["error"]
+    except Exception:
+        pass
+    return response.text or f"Request failed with status {response.status_code}."
+
+
+def _build_payment_metadata(payment_config, receipt=None, *, mode="x402-sdk"):
+    metadata = {
+        "wallet_type": payment_config.wallet_type,
+        "auto_pay": payment_config.auto_pay,
+        "max_payment_usd": payment_config.max_payment_usd,
+        "authorization_mode": mode,
+    }
+    if receipt is not None:
+        metadata["receipt"] = receipt
+    return metadata
+
+
+def _extract_payment_challenge(response):
+    try:
+        payload = response.json()
+        if isinstance(payload, dict) and payload.get("accepts"):
+            return payload
+    except Exception:
+        pass
+    header = response.headers.get("PAYMENT-REQUIRED")
+    if header:
+        try:
+            return json.loads(base64.b64decode(header).decode("utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _request_with_optional_payment(method, path, *, params=None, body=None, require_auth=True, timeout=30):
+    api_key = get_api_key()
+    config = load_config()
+    payment_config = load_payment_config(config)
+    headers = {"Content-Type": "application/json"}
+    if require_auth and api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    last_exception = None
+    response = None
+    url = None
+    for base in _api_base_candidates():
+        url = f"{base}{path}"
+        try:
+            candidate = httpx.request(method, url, headers=headers, params=params, json=body, timeout=timeout)
+            if (
+                base != _api_base_candidates()[-1]
+                and _should_retry_direct_from_response(candidate)
+            ):
+                response = candidate
+                continue
+            response = candidate
+            break
+        except Exception as exc:
+            last_exception = exc
+            if base != _api_base_candidates()[-1] and _should_retry_direct_from_exception(exc):
+                continue
+            raise
+
+    if response is None:
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("No API response received.")
+
+    if not (require_auth and not api_key and payment_config and response.status_code == 402):
+        response.raise_for_status()
+        return response.json()
+
+    challenge = _extract_payment_challenge(response) or {"error": response.text}
+    if not response.headers.get("PAYMENT-REQUIRED"):
+        raise PaymentError(
+            "The server did not return a standard x402 payment challenge.",
+            details={"status_code": response.status_code},
+        )
+    ensure_wallet_runtime_ready(payment_config)
+    payment_details = enforce_payment_policy(payment_config, challenge)
+    result = request_with_x402(
+        method,
+        url,
+        payment_config=payment_config,
+        params=params,
+        body=body,
+        headers=headers,
+        timeout=timeout,
+    )
+    if result.get("status_code", 0) >= 400:
+        raise PaymentError(
+            "The x402-paid request did not complete successfully.",
+            details=payment_details,
+        )
+    payment_metadata = dict(payment_details)
+    payment_metadata.update(_build_payment_metadata(payment_config, result.get("receipt")))
+    return _attach_payment_metadata(result.get("payload"), payment_metadata)
+
+def api_get(path, params=None, require_auth=True, timeout=30):
+    """Query BlockINTQL API — sends address+chain ONLY, never provider keys."""
+    try:
+        return _request_with_optional_payment(
+            "GET",
+            path,
+            params=params,
+            require_auth=require_auth,
+            timeout=timeout,
+        )
+    except PaymentError as e:
+        return e.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+def api_post(path, body, require_auth=True, timeout=60):
+    """Query BlockINTQL API — sends address+chain ONLY, never provider keys."""
+    try:
+        return _request_with_optional_payment(
+            "POST",
+            path,
+            body=body,
+            require_auth=require_auth,
+            timeout=timeout,
+        )
+    except PaymentError as e:
+        return e.to_dict()
     except Exception as e:
         return {"error": str(e)}
 
 
-def format_api_error(response, data):
-    status = response.status_code
-    payload = data if isinstance(data, dict) else {}
-    result = dict(payload)
-    result.setdefault("error", payload.get("detail") if isinstance(payload, dict) else response.text or f"HTTP {status}")
-    result["_http_status"] = status
-
-    if status == 402:
-        need = payload.get("error", "")
-        result["friendly_error"] = "This command requires available credits or x402 payment."
-        result["next_steps"] = [
-            "Buy credits: blockintql buy",
-            "Or enable x402 payment with: blockintql pay --auto-pay",
-        ]
-    elif status == 401:
-        result["friendly_error"] = "API key is missing, invalid, or expired."
-        result["next_steps"] = [
-            "Generate a key: blockintql init",
-            "Or save an existing key: blockintql auth --api-key YOUR_KEY",
-        ]
-    return result
-
-
-def api_put(path, body, require_auth=True):
+def api_put(path, body, require_auth=True, timeout=60):
+    """Update BlockINTQL API resources with authenticated JSON payloads."""
     try:
-        headers = get_headers() if require_auth else get_optional_headers()
-        r = httpx.put(f"{API_BASE}{path}", headers=headers, json=body, timeout=60)
-        data = r.json() if r.text else {}
-        if r.status_code >= 400:
-            return format_api_error(r, data)
-        return data
+        return _request_with_optional_payment(
+            "PUT",
+            path,
+            body=body,
+            require_auth=require_auth,
+            timeout=timeout,
+        )
+    except PaymentError as e:
+        return e.to_dict()
     except Exception as e:
         return {"error": str(e)}
 
+
+def admin_api_get(path, params=None, timeout=30):
+    try:
+        response = httpx.get(f"{API_BASE}{path}", headers=get_admin_headers(), params=params, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        return {"error": str(e)}
 
 def create_workspace_from_plan(plan_result, quiet=False, agent=False):
+    """Create a workspace from a plan payload when the API recommends one."""
     recommended = plan_result.get("recommended_workspace") or {}
     payload = recommended.get("payload") or {}
     if not payload:
@@ -200,7 +346,7 @@ def persist_workspace_ask_history(workspace_id, goal, address, chain, plan_resul
             "type": "resumed_workspace",
             "label": workspace.get("name") or workspace.get("workspace_id") or "workspace",
             "status": workspace.get("status"),
-            "detail": workspace.get("reason") or "Continued inside the selected workspace.",
+            "detail": workspace.get("reason") or "Continued in the selected workspace.",
         }
     elif plan_result.get("executed_workspace", {}).get("workspace_id"):
         workspace = plan_result.get("executed_workspace") or {}
@@ -262,26 +408,11 @@ def persist_workspace_ask_history(workspace_id, goal, address, chain, plan_resul
     )
 
 
-def run_ask_flow(
-    goal,
-    address=None,
-    workspace_id=None,
-    chain="ethereum",
-    budget_credits=None,
-    budget_usd=None,
-    upto_budget_usd=None,
-    prefer_surface="auto",
-    execute_first_step=False,
-    open_workspace=False,
-    agent=False,
-    quiet=False,
-):
+def run_ask_flow(goal, address=None, workspace_id=None, chain="ethereum", budget_credits=None, budget_usd=None,
+                 upto_budget_usd=None, open_workspace=False, mode=None, agent=False, quiet=False):
     body = {
         "goal": goal,
         "chain": chain,
-        "prefer_surface": prefer_surface,
-        "execute": bool(execute_first_step),
-        "execute_workspace": bool(open_workspace),
     }
     if address:
         body["address"] = address
@@ -293,21 +424,13 @@ def run_ask_flow(
         body["budget_usd"] = budget_usd
     if upto_budget_usd is not None:
         body["upto_budget_usd"] = upto_budget_usd
+    if mode:
+        body["execution_profile"] = mode
+    if open_workspace:
+        body["prefer_surface"] = "workspace"
+        body["execute_workspace"] = True
 
-    require_auth = bool(workspace_id or open_workspace)
-    result = api_post("/v1/plan", body, require_auth=require_auth)
-
-    if "error" in result and (execute_first_step or open_workspace) and should_retry_plan_without_execution(result):
-        fallback_body = dict(body)
-        fallback_body["execute"] = False
-        fallback_body["execute_workspace"] = False
-        fallback = api_post("/v1/plan", fallback_body, require_auth=False)
-        if "error" not in fallback:
-            fallback["execution_skipped"] = {
-                "reason": "Execution requires credits or payment authorization",
-                "next": "Authenticate with an API key, add credits, or enable x402 before executing actions",
-            }
-            result = fallback
+    result = api_post("/v1/plan", body, require_auth=bool(open_workspace or workspace_id))
 
     if workspace_id and "error" not in result:
         workspace = api_get(f"/v1/workspaces/{workspace_id}", require_auth=True)
@@ -319,38 +442,33 @@ def run_ask_flow(
                 "activity": workspace.get("activity") or {},
                 "reason": "Continued inside the selected workspace.",
             }
-    elif open_workspace and "error" not in result and not result.get("resume_workspace"):
-        existing = api_get("/v1/workspaces", params={"limit": 10}, require_auth=True)
-        workspaces = existing.get("workspaces") if isinstance(existing, dict) else None
-        candidate = choose_resume_candidate(workspaces or [], seed_address=address, goal_text=goal)
-        if candidate and int((candidate.get("activity") or {}).get("activity_score", 0)) > 0:
-            result["resume_workspace"] = {
-                "workspace_id": candidate.get("workspace_id"),
-                "name": candidate.get("name"),
-                "status": candidate.get("status"),
-                "activity": candidate.get("activity") or {},
-                "reason": describe_resume_reason(candidate, seed_address=address, goal_text=goal),
-            }
+
+    elif open_workspace and "error" not in result:
+        workspace_surface = result.get("recommended_surface") == "workspace" or bool(result.get("recommended_workspace"))
+        if workspace_surface:
+            existing = api_get("/v1/workspaces", params={"limit": 10}, require_auth=True)
+            workspaces = existing.get("workspaces") if isinstance(existing, dict) else None
+            candidate = choose_resume_candidate(workspaces or [], seed_address=address, goal_text=goal)
+            if candidate and int((candidate.get("activity") or {}).get("activity_score", 0)) > 0:
+                result["resume_workspace"] = {
+                    "workspace_id": candidate.get("workspace_id"),
+                    "name": candidate.get("name"),
+                    "status": candidate.get("status"),
+                    "activity": candidate.get("activity") or {},
+                    "reason": describe_resume_reason(candidate, seed_address=address, goal_text=goal),
+                }
 
     if (
         open_workspace
         and "error" not in result
         and not result.get("executed_workspace")
-        and not result.get("resume_workspace")
         and result.get("recommended_workspace", {}).get("payload")
+        and not result.get("resume_workspace")
         and not workspace_id
     ):
         fallback = create_workspace_from_plan(result, quiet=quiet, agent=agent)
         if fallback:
             result.update(fallback)
-
-    if "error" not in result and execute_first_step:
-        if result.get("execution_skipped"):
-            pass
-        elif result.get("executed_action", {}).get("result") is not None:
-            result = result["executed_action"]["result"]
-        else:
-            result = execute_planned_first_step(result, address)
 
     target_workspace_id = None
     if workspace_id:
@@ -359,40 +477,90 @@ def run_ask_flow(
         target_workspace_id = result["resume_workspace"]["workspace_id"]
     elif result.get("executed_workspace", {}).get("workspace_id"):
         target_workspace_id = result["executed_workspace"]["workspace_id"]
-
-    if target_workspace_id and "error" not in result:
+    if open_workspace and target_workspace_id and "error" not in result:
         history_result = persist_workspace_ask_history(target_workspace_id, goal, address, chain, result)
         if isinstance(history_result, dict) and "error" in history_result:
             result["ask_history_warning"] = history_result["error"]
 
     output(result, agent, quiet)
 
-    if open_workspace and not agent and not quiet and sys.stdout.isatty() and target_workspace_id:
-        resume_reason = None
-        resume_source = None
+    if open_workspace and not agent and not quiet and sys.stdout.isatty():
         if result.get("resume_workspace", {}).get("workspace_id"):
+            target_workspace_id = result["resume_workspace"]["workspace_id"]
             resume_reason = result["resume_workspace"].get("reason")
             resume_activity = result["resume_workspace"].get("activity") or {}
-            resume_source = "ask_resume_candidate_graph" if resume_activity.get("graph_initialized") else "ask_resume_candidate"
+            resume_source = (
+                "ask_resume_candidate_graph"
+                if resume_activity.get("graph_initialized")
+                else "ask_resume_candidate"
+            )
+        elif result.get("executed_workspace", {}).get("workspace_id"):
+            target_workspace_id = result["executed_workspace"]["workspace_id"]
+            resume_reason = None
+            resume_source = None
         elif workspace_id:
+            target_workspace_id = workspace_id
             resume_reason = "Continued inside the selected workspace."
             resume_source = "workspace_chat"
-        open_result = open_workspace_in_browser(
-            target_workspace_id,
-            resume_reason=resume_reason,
-            resume_source=resume_source,
-        )
-        if open_result is None:
-            console.print("[dim]Browser opened to investigation workspace.[/]")
-        elif str(open_result).startswith("http"):
-            console.print(f"[dim]Open this URL manually:[/] {open_result}")
         else:
-            console.print(f"[yellow]{open_result}[/]")
+            target_workspace_id = None
+            resume_reason = None
+            resume_source = None
+
+        if target_workspace_id:
+            open_result = open_workspace_in_browser(
+                target_workspace_id,
+                resume_reason=resume_reason,
+                resume_source=resume_source,
+            )
+            if open_result is None:
+                console.print("[dim]Browser opened to investigation workspace.[/]")
+            elif str(open_result).startswith("http"):
+                console.print(f"[dim]Open this URL manually:[/] {open_result}")
+            else:
+                console.print(f"[yellow]{open_result}[/]")
 
     return result
 
 
+def _with_query_params(url, params):
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.update({key: value for key, value in params.items() if value not in (None, "")})
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def open_workspace_in_browser(workspace_id, resume_reason=None, resume_source=None):
+    import webbrowser
+
+    data = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in data:
+        return data.get("error")
+    url = workspace_launch_url(data)
+    if not url:
+        return "Workspace is not ready to open yet."
+    api_key = get_api_key()
+    url = _with_query_params(
+        url,
+        {
+            "api_key": api_key,
+            "resume": "1" if resume_reason else "",
+            "resume_reason": resume_reason,
+            "resume_source": resume_source,
+        },
+    )
+    try:
+        webbrowser.open(url)
+        return None
+    except Exception:
+        return url
+
 def enrich_with_provider(result, address, chain, provider_name, provider_key, provider_url):
+    """
+    PRIVACY: Runs entirely on your local machine.
+    Calls provider API directly — key never sent to BlockINTQL.
+    Only the merged verdict (no raw provider data) is shown to user.
+    """
     if not provider_name:
         return result
     provider = get_provider(provider_name, provider_key or "", url_template=provider_url)
@@ -403,18 +571,43 @@ def enrich_with_provider(result, address, chain, provider_name, provider_key, pr
         err_console.print(f"[yellow]{provider_name} requires --provider-key or BLOCKINTQL_PROVIDER_KEY[/]")
         return result
 
+    # PRIVACY: This call goes directly to provider API from your machine
     pd = provider.get_address_risk(address, chain)
 
     if "error" in pd.get("raw", {}):
         return result
 
+    provider_policy = adjudicate_provider_result(pd)
+
+    # Merge — take higher risk score
     result["risk_score"] = max(pd.get("risk_score", 0), result.get("risk_score", 0))
     if pd.get("entity_name") and not result.get("entity"):
         result["entity"] = pd["entity_name"]
-    if pd.get("sanctions_hit"):
+    provider_recommended_verdict = provider_policy.get("recommended_verdict")
+    canonical_category = provider_policy.get("canonical_category")
+    if pd.get("sanctions_hit") or provider_recommended_verdict == "BLOCK":
         result["verdict"] = "BLOCK"
         result["safe"] = False
-        result.setdefault("risk_indicators", []).append("SANCTIONS")
+        if canonical_category:
+            result.setdefault("risk_indicators", []).append(f"PROVIDER_{canonical_category.upper()}")
+    elif provider_recommended_verdict in {"CAUTION", "UNKNOWN"} and result.get("verdict") == "CLEAR":
+        result["verdict"] = "CAUTION"
+        result["safe"] = False
+        if canonical_category:
+            result.setdefault("risk_indicators", []).append(f"PROVIDER_{canonical_category.upper()}")
+
+    risk_indicators = []
+    for item in result.get("risk_indicators", []):
+        if item not in risk_indicators:
+            risk_indicators.append(item)
+    result["risk_indicators"] = risk_indicators
+
+    if provider_recommended_verdict in {"CAUTION", "UNKNOWN"}:
+        result["action"] = "review"
+    if provider_recommended_verdict == "BLOCK":
+        result["action"] = "block"
+
+    # Store an allowlisted summary only. Raw provider responses stay local.
     result["provider_data"] = {
         "provider": provider_name,
         "entity_name": pd.get("entity_name"),
@@ -422,12 +615,218 @@ def enrich_with_provider(result, address, chain, provider_name, provider_key, pr
         "risk_score": pd.get("risk_score", 0),
         "risk_indicators": pd.get("risk_indicators", []),
         "sanctions_hit": pd.get("sanctions_hit", False),
+        "canonical_category": canonical_category,
+        "recommended_verdict": provider_recommended_verdict,
+        "severity": provider_policy.get("severity"),
+        "confidence": provider_policy.get("confidence"),
+        "reasons": provider_policy.get("reasons", []),
     }
     return result
 
-
 def verdict_color(v):
     return {"CLEAR": "green", "CAUTION": "yellow", "BLOCK": "red"}.get(str(v).upper(), "white")
+
+
+def _as_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _short_addr(value, width=12):
+    text = str(value or "")
+    if len(text) <= width:
+        return text
+    keep = max(4, (width - 3) // 2)
+    return f"{text[:keep]}...{text[-keep:]}"
+
+
+def _sparkline(values):
+    ticks = "▁▂▃▄▅▆▇█"
+    nums = [_as_float(v) for v in values]
+    if not nums or max(nums) <= 0:
+        return "·" * max(1, len(nums))
+    peak = max(nums)
+    chars = []
+    for value in nums:
+        idx = int(round((value / peak) * (len(ticks) - 1)))
+        chars.append(ticks[max(0, min(idx, len(ticks) - 1))])
+    return "".join(chars)
+
+
+def _bar(value, peak, width=24):
+    if peak <= 0:
+        return ""
+    filled = int(round((_as_float(value) / peak) * width))
+    return "█" * max(0, min(filled, width))
+
+
+def render_stablecoin_flow_chart(result, *, hours=24, interval="hour", token=None):
+    data = (result or {}).get("data") or {}
+    rows = data.get("series") or []
+    window_hours_used = int(data.get("window_hours_used") or hours or 0)
+    source = (result or {}).get("source") or "unknown"
+    if not rows:
+        console.print("[yellow]No stablecoin flow data available for that window.[/]")
+        if window_hours_used and window_hours_used != hours:
+            console.print(f"[dim]Tried widening from {hours}h to {window_hours_used}h via {source}.[/]")
+        else:
+            console.print("[dim]Try a wider window like `--hours 72` or `--hours 168`, or focus a token with `--token USDC` / `--token USDT`.[/]")
+        return
+
+    grouped = {}
+    for row in rows:
+        symbol = row.get("token_symbol") or "UNKNOWN"
+        grouped.setdefault(symbol, []).append(row)
+
+    summary = data.get("summary") or {}
+    peak_summary_volume = max(
+        (_as_float((details or {}).get("total_volume")) for details in summary.values()),
+        default=0.0,
+    )
+    console.print()
+    console.print("[bold cyan]Stablecoin Flow Chart[/bold cyan]")
+    header_bits = [f"{hours}h requested", f"{window_hours_used}h scanned", f"interval={interval}", f"token={token or 'all'}", f"source={source}"]
+    console.print(f"[dim]{' · '.join(header_bits)}[/dim]")
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    if summary:
+        console.print("[bold]Market Summary[/bold]")
+        for symbol, details in sorted(
+            summary.items(),
+            key=lambda item: _as_float((item[1] or {}).get("total_volume")),
+            reverse=True,
+        ):
+            total_volume = _as_float((details or {}).get("total_volume"))
+            transfer_count = int((details or {}).get("transfer_count") or 0)
+            bar = _bar(total_volume, peak_summary_volume, width=20)
+            console.print(
+                f"[bold]{symbol:<5}[/bold] {bar:<20} "
+                f"[dim]vol[/dim] ${total_volume:,.0f}  [dim]tx[/dim] {transfer_count}"
+            )
+        console.print(f"[dim]{'─' * 76}[/dim]")
+    for symbol, series in sorted(grouped.items()):
+        ordered = sorted(series, key=lambda item: str(item.get("bucket") or ""))
+        values = [_as_float(item.get("total_volume")) for item in ordered]
+        transfer_count = sum(int(item.get("transfer_count") or 0) for item in ordered)
+        largest_transfer = max((_as_float(item.get("largest_transfer")) for item in ordered), default=0.0)
+        unique_senders = max((int(item.get("unique_senders") or 0) for item in ordered), default=0)
+        unique_receivers = max((int(item.get("unique_receivers") or 0) for item in ordered), default=0)
+        console.print(
+            f"[bold]{symbol:>5}[/bold]  {_sparkline(values)}  "
+            f"[dim]vol[/dim] ${sum(values):,.0f}  [dim]tx[/dim] {transfer_count}"
+        )
+        console.print(
+            f"      [dim]peak transfer[/dim] ${largest_transfer:,.0f}  "
+            f"[dim]senders[/dim] {unique_senders}  [dim]receivers[/dim] {unique_receivers}"
+        )
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    console.print("[dim]BlockINTQL · terminal chart[/dim]")
+    console.print()
+
+
+def render_wallet_stablecoin_chart(result, *, address, days=30, token=None):
+    data = (result or {}).get("data") or {}
+    rows = data.get("rows") or []
+    if not rows:
+        console.print("[yellow]No wallet stablecoin history found for that window.[/]")
+        return
+
+    grouped = {}
+    for row in rows:
+        symbol = row.get("token_symbol") or "UNKNOWN"
+        grouped.setdefault(symbol, []).append(row)
+
+    console.print()
+    console.print("[bold cyan]Wallet Stablecoin Chart[/bold cyan]")
+    console.print(f"[dim]{_short_addr(address, 18)} · {days}d · token={token or 'all'}[/dim]")
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    for symbol, series in sorted(grouped.items()):
+        ordered = sorted(series, key=lambda item: str(item.get("bucket") or ""))
+        incoming = sum(_as_float(item.get("incoming_amount")) for item in ordered)
+        outgoing = sum(_as_float(item.get("outgoing_amount")) for item in ordered)
+        peak = max(
+            max((_as_float(item.get("incoming_amount")) for item in ordered), default=0.0),
+            max((_as_float(item.get("outgoing_amount")) for item in ordered), default=0.0),
+            1.0,
+        )
+        console.print(
+            f"[bold]{symbol:>5}[/bold]  [dim]in[/dim] {incoming:,.2f}  "
+            f"[dim]out[/dim] {outgoing:,.2f}  [dim]net[/dim] {incoming - outgoing:,.2f}"
+        )
+        for row in ordered[-8:]:
+            bucket = str(row.get("bucket") or "")[:10]
+            in_amount = _as_float(row.get("incoming_amount"))
+            out_amount = _as_float(row.get("outgoing_amount"))
+            in_bar = _bar(in_amount, peak, width=12)
+            out_bar = _bar(out_amount, peak, width=12)
+            console.print(
+                f"      [dim]{bucket}[/dim]  "
+                f"[green]{in_bar:<12}[/green] [dim]{in_amount:>10,.2f}[/dim]  "
+                f"[red]{out_bar:<12}[/red] [dim]{out_amount:>10,.2f}[/dim]"
+            )
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    console.print("[dim]green=inbound · red=outbound[/dim]")
+    console.print("[dim]BlockINTQL · terminal chart[/dim]")
+    console.print()
+
+
+def render_wallet_stablecoin_balances_chart(result, *, address):
+    data = (result or {}).get("data") or {}
+    balances = (data.get("stablecoin_balances") or {})
+    rows = []
+    for symbol, details in balances.items():
+        amount = _as_float((details or {}).get("balance"))
+        rows.append((symbol, amount))
+
+    if not rows or max((amount for _, amount in rows), default=0.0) <= 0:
+        console.print("[yellow]No major stablecoin balances detected for that wallet.[/]")
+        return
+
+    peak = max(amount for _, amount in rows)
+    total = _as_float(data.get("wallet_total_usd"))
+    console.print()
+    console.print("[bold cyan]Wallet Stablecoin Balances[/bold cyan]")
+    console.print(f"[dim]{_short_addr(address, 18)} · current holdings[/dim]")
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    for symbol, amount in sorted(rows, key=lambda item: item[1], reverse=True):
+        bar = _bar(amount, peak)
+        console.print(
+            f"[bold]{symbol:<5}[/bold] {bar:<24} "
+            f"[dim]balance[/dim] {amount:,.2f}"
+        )
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    console.print(f"[dim]tracked total[/dim] ${total:,.2f}")
+    console.print("[dim]BlockINTQL · terminal chart[/dim]")
+    console.print()
+
+
+def render_counterparty_chart(result, *, address, token=None):
+    data = (result or {}).get("data") or {}
+    rows = data.get("rows") or []
+    if not rows:
+        console.print("[yellow]No stablecoin counterparties found for that wallet.[/]")
+        return
+
+    top_rows = rows[:10]
+    peak = max((_as_float(row.get("total_amount")) for row in top_rows), default=0.0)
+    console.print()
+    console.print("[bold cyan]Counterparty Chart[/bold cyan]")
+    console.print(f"[dim]{_short_addr(address, 18)} · token={token or 'all'}[/dim]")
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    for row in top_rows:
+        amount = _as_float(row.get("total_amount"))
+        label = _short_addr(row.get("counterparty"), 18)
+        direction = row.get("direction") or "both"
+        symbol = row.get("token_symbol") or "UNKNOWN"
+        bar = _bar(amount, peak)
+        console.print(
+            f"[bold]{label:<18}[/bold] {bar:<24} "
+            f"[dim]{symbol} {direction}[/dim] ${amount:,.0f} [dim]tx[/dim] {int(row.get('tx_count') or 0)}"
+        )
+    console.print(f"[dim]{'─' * 76}[/dim]")
+    console.print("[dim]BlockINTQL · terminal chart[/dim]")
+    console.print()
 
 
 def workspace_launch_url(manifest):
@@ -489,860 +888,136 @@ def describe_resume_reason(workspace, seed_address=None, goal_text=""):
 
 
 def recommended_workspace_payload(workspace):
+    activity = workspace.get("activity") or {}
     return {
         "workspace_id": workspace.get("workspace_id"),
         "name": workspace.get("name"),
         "status": workspace.get("status"),
-        "activity": workspace.get("activity") or {},
+        "activity": activity,
         "reason": workspace.get("reason"),
         "workspace_context": workspace.get("workspace_context") or {},
     }
 
 
-def summarize_action_hint(action):
-    if not isinstance(action, dict):
+def summarize_plan_steps(steps):
+    items = []
+    for idx, step in enumerate(steps or [], start=1):
+        title = step.get("title") or step.get("capability_id") or f"step-{idx}"
+        surface = step.get("surface") or "unknown"
+        optional = " optional" if step.get("optional") else ""
+        reason = step.get("reason") or ""
+        items.append(
+            {
+                "idx": idx,
+                "title": title,
+                "surface": surface,
+                "optional": optional,
+                "reason": reason,
+            }
+        )
+    return items
+
+
+def materialize_cli_command(command, *, address="", execution_profile=None):
+    cmd = (command or "").strip()
+    if not cmd:
         return None
-    hints = []
-    if action.get("target_panel"):
-        hints.append(f"opens {action['target_panel']}")
-    if action.get("target_query_type"):
-        hints.append(f"queues {action['target_query_type']}")
-    if action.get("preferred_focus"):
-        hints.append(f"focus {action['preferred_focus']}")
-    if action.get("auto_chain_safe"):
-        hints.append("safe chain")
-    return " · ".join(hints) if hints else None
-
-
-def workspace_brief_payload(manifest, fallback_workspace_id=None):
-    workspace = manifest.get("workspace") or {}
-    context = manifest.get("context") or {}
-    brief = context.get("investigation_brief") or {}
-    seed = context.get("seed") or {}
-    return {
-        "workspace_id": workspace.get("workspace_id") or fallback_workspace_id,
-        "name": workspace.get("name"),
-        "status": workspace.get("status"),
-        "investigation_brief": {
-            "goal": brief.get("goal") or seed.get("goal"),
-            "seed_address": brief.get("seed_address") or seed.get("address"),
-            "recommended_actions": brief.get("recommended_actions") or [],
-        },
-    }
-
-
-def extract_workspace_ask_history(payload):
-    candidates = [
-        payload.get("saved_state"),
-        payload.get("workspace_state"),
-        payload.get("state"),
-        (payload.get("workspace") or {}).get("saved_state") if isinstance(payload.get("workspace"), dict) else None,
-        payload.get("context"),
-    ]
-    for candidate in candidates:
-        if isinstance(candidate, dict) and isinstance(candidate.get("ask_history"), list):
-            return candidate.get("ask_history") or []
-    return []
-
-
-def workspace_conversation_payload(manifest, fallback_workspace_id=None, limit=None):
-    workspace = manifest.get("workspace") or {}
-    thread = extract_workspace_ask_history(manifest)
-    if limit is not None:
-        thread = thread[-max(limit, 0):]
-    return {
-        "workspace_id": workspace.get("workspace_id") or fallback_workspace_id,
-        "name": workspace.get("name"),
-        "status": workspace.get("status"),
-        "workspace_conversation": thread,
-    }
-
-
-def workspace_review_payload(manifest, fallback_workspace_id=None, limit=None):
-    workspace = manifest.get("workspace") or {}
-    review = workspace_brief_payload(manifest, fallback_workspace_id=fallback_workspace_id)
-    review["workspace_conversation"] = workspace_conversation_payload(
-        manifest,
-        fallback_workspace_id=fallback_workspace_id,
-        limit=limit,
-    ).get("workspace_conversation", [])
-    review["activity"] = workspace.get("activity") or {}
-    review["workspace_context"] = workspace.get("workspace_context") or {}
-    return review
-
-
-def _with_query_params(url, params):
-    parsed = urlparse(url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.update({key: value for key, value in params.items() if value not in (None, "")})
-    return urlunparse(parsed._replace(query=urlencode(query)))
-
-
-def open_workspace_in_browser(workspace_id, resume_reason=None, resume_source=None):
-    import webbrowser
-
-    data = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
-    if "error" in data:
-        return data.get("error")
-    url = workspace_launch_url(data)
-    if not url:
-        return "Workspace is not ready to open yet."
-    api_key = get_api_key()
-    url = _with_query_params(
-        url,
-        {
-            "api_key": api_key,
-            "resume": "1" if resume_reason else "",
-            "resume_reason": resume_reason,
-            "resume_source": resume_source,
-        },
-    )
-    try:
-        webbrowser.open(url)
-        return None
-    except Exception:
-        return url
-
-
-def print_rule():
-    console.print(f"  [dim]{'─' * 52}[/dim]")
-
-
-def preview_addresses(addresses, limit=3):
-    items = [a for a in addresses if a]
-    if not items:
-        return "none"
-    shown = items[:limit]
-    if len(items) > limit:
-        shown.append(f"+{len(items) - limit} more")
-    return ", ".join(shown)
-
-
-def render_status(data):
-    console.print()
-    console.print("  [bold green]Account active[/bold green]")
-    print_rule()
-    console.print(f"  [dim]key      [/dim] {data.get('key_prefix', 'unknown')}")
-    console.print(f"  [dim]tier     [/dim] {data.get('tier', 'unknown')}")
-    console.print(f"  [dim]credits  [/dim] {data.get('credits', 0)}")
-    console.print(f"  [dim]name     [/dim] {data.get('display_name') or 'Not set'}")
-    console.print(f"  [dim]email    [/dim] {data.get('email') or 'Not set'}")
-    if data.get("created_at"):
-        console.print(f"  [dim]created  [/dim] {data['created_at']}")
-    print_rule()
-    if data.get("credits", 0) <= 0:
-        console.print("  [yellow]No available credits on this key[/yellow]")
-        console.print("  [dim]Next: blockintql buy[/dim]")
-        console.print("  [dim]Or use x402 per request: blockintql pay --auto-pay[/dim]")
-    else:
-        console.print("  [dim]Next: blockintql verdict <address>[/dim]")
-    console.print()
-
-
-def render_trace(data):
-    console.print()
-    console.print("  [bold cyan]Trace complete[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]txid     [/dim] {data.get('txid', '')}")
-    console.print(f"  [dim]method   [/dim] {data.get('method', 'FIFO')}")
-    console.print(f"  [dim]hops     [/dim] {data.get('hops_analyzed', 0)} analyzed / {data.get('transactions_traced', 0)} txs")
-    console.print(f"  [dim]outputs  [/dim] {data.get('traceable_outputs', 0)} traceable outputs")
-    if data.get("narrative"):
-        print_rule()
-        console.print(f"  [dim]{data['narrative']}[/dim]")
-
-    tx_summary = data.get("tx_summary") or {}
-    if tx_summary:
-        print_rule()
-        console.print("  [bold]Transaction Shape[/bold]")
-        console.print(f"  [dim]in/out   [/dim] {tx_summary.get('input_count', 0)} inputs · {tx_summary.get('output_count', 0)} outputs")
-        console.print(f"  [dim]btc      [/dim] {tx_summary.get('total_input_btc', 0)} in · {tx_summary.get('total_output_btc', 0)} out")
-        console.print(f"  [dim]fee      [/dim] {tx_summary.get('fee_btc', 0)} BTC")
-        console.print(f"  [dim]largest  [/dim] {tx_summary.get('largest_output_btc', 0)} BTC")
-        console.print(f"  [dim]inputs   [/dim] {preview_addresses(tx_summary.get('input_addresses', []))}")
-        console.print(f"  [dim]outputs  [/dim] {preview_addresses(tx_summary.get('output_addresses', []))}")
-
-    observations = data.get("observations") or []
-    if observations:
-        print_rule()
-        console.print("  [bold]Observations[/bold]")
-        for item in observations[:4]:
-            console.print(f"  [dim]• {item}[/dim]")
-
-    destinations = data.get("destinations") or []
-    if destinations:
-        print_rule()
-        console.print("  [bold]Resolved Destinations[/bold]")
-        for dest in destinations[:5]:
-            label = dest.get("entity") or dest.get("destination_type", "unknown")
-            console.print(f"  [dim]• {dest.get('amount_btc', 0)} BTC -> {label} (hop {dest.get('hop', '?')})[/dim]")
-
-    unresolved = data.get("unresolved_spends") or []
-    if unresolved:
-        print_rule()
-        console.print(f"  [bold]Unresolved Spends[/bold] [dim]({len(unresolved)})[/dim]")
-        for item in unresolved[:4]:
-            console.print(f"  [dim]• {item.get('amount_btc', 0)} BTC at {item.get('address', 'unknown')}[/dim]")
-
-    skipped = data.get("skipped") or []
-    if skipped:
-        print_rule()
-        console.print(f"  [bold]Skipped During Analysis[/bold] [dim]({len(skipped)})[/dim]")
-        for item in skipped[:3]:
-            console.print(f"  [dim]• {item.get('txid', '')} — {item.get('reason', 'unknown')}[/dim]")
-
-    print_rule()
-    console.print("  [dim]Next: blockintql report --address <address> --entity \"Observed Entity\" --category OTHER[/dim]")
-    console.print()
-
-
-def render_opreturn_search(data):
-    console.print()
-    count = data.get("results", 0)
-    title = "OP_RETURN matches found" if count else "No OP_RETURN matches found"
-    color = "green" if count else "yellow"
-    console.print(f"  [bold {color}]{title}[/bold {color}]")
-    print_rule()
-    console.print(f"  [dim]query    [/dim] {data.get('query') or '(none)'}")
-    console.print(f"  [dim]protocol [/dim] {data.get('protocol', 'all')}")
-    console.print(f"  [dim]results  [/dim] {count}")
-
-    summary = data.get("summary") or {}
-    top_protocols = summary.get("top_protocols") or []
-    if top_protocols:
-        top_summary = ", ".join(f"{row['protocol']} ({row['count']})" for row in top_protocols[:3])
-        console.print(f"  [dim]top      [/dim] {top_summary}")
-    if "identity_hit_count" in summary:
-        console.print(f"  [dim]identity [/dim] {summary.get('identity_hit_count', 0)} records")
-
-    rows = data.get("data") or []
-    if rows:
-        print_rule()
-        console.print("  [bold]Previews[/bold]")
-        for row in rows[:3]:
-            proto = row.get("protocol") or "unknown"
-            txid = row.get("tx_hash", "")[:12]
-            preview = row.get("preview") or row.get("decoded_text") or "(no preview)"
-            console.print(f"  [dim]• {proto} · {txid}…[/dim]")
-            console.print(f"    {preview}")
-
-    guidance = data.get("guidance") or {}
-    tips = guidance.get("tips") or []
-    if tips:
-        print_rule()
-        console.print("  [bold]Search Tips[/bold]")
-        for tip in tips[:3]:
-            console.print(f"  [dim]• {tip}[/dim]")
-
-    print_rule()
-    console.print("  [dim]Next: try a shorter keyword or add --protocol for a narrower search[/dim]")
-    console.print()
-
-
-def render_opreturn_tx(data):
-    console.print()
-    found = data.get("found", False)
-    console.print(f"  [bold {'green' if found else 'yellow'}]{'OP_RETURN data found' if found else 'No indexed OP_RETURN data found'}[/bold {'green' if found else 'yellow'}]")
-    print_rule()
-    console.print(f"  [dim]txid     [/dim] {data.get('tx_hash', '')}")
-    console.print(f"  [dim]results  [/dim] {data.get('results', 0)}")
-    rows = data.get("data") or []
-    for row in rows[:3]:
-        console.print(f"  [dim]protocol [/dim] {row.get('protocol') or 'unknown'}")
-        console.print(f"  [dim]preview  [/dim] {row.get('preview') or '(no preview)'}")
-    guidance = (data.get("guidance") or {}).get("tips") or []
-    if guidance:
-        print_rule()
-        for tip in guidance[:2]:
-            console.print(f"  [dim]• {tip}[/dim]")
-    console.print()
-
-
-def render_stablecoin_balances(data):
-    payload = data.get("data", data)
-    balances = payload.get("stablecoin_balances", {})
-    console.print()
-    console.print("  [bold cyan]Stablecoin balances[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
-    console.print(f"  [dim]total    [/dim] ${payload.get('wallet_total_usd', 0)}")
-    coverage = payload.get("coverage", {})
-    if coverage.get("coverage_note"):
-        console.print(f"  [dim]coverage [/dim] {coverage['coverage_note']}")
-    if balances:
-        print_rule()
-        for symbol, item in balances.items():
-            console.print(f"  [dim]{symbol:<8}[/dim] {item.get('balance', 0)}")
-    console.print()
-
-
-def render_stablecoin_history(data):
-    payload = data.get("data", data)
-    rows = payload.get("rows", [])
-    console.print()
-    console.print("  [bold cyan]Stablecoin history[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
-    console.print(f"  [dim]window   [/dim] {payload.get('days', 0)} days · {payload.get('interval', 'day')}")
-    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
-    if not rows:
-        console.print("  [yellow]No stablecoin history found for this wallet and time window[/yellow]")
-        console.print()
-        return
-    print_rule()
-    for row in rows[:8]:
-        bucket = str(row.get("bucket", ""))[:19]
-        console.print(
-            f"  [dim]{bucket}[/dim]  "
-            f"{row.get('token_symbol', ''):<5}  "
-            f"+{row.get('incoming_amount', 0)}  "
-            f"-{row.get('outgoing_amount', 0)}  "
-            f"net {row.get('net_amount', 0)}"
-        )
-    console.print()
-
-
-def render_stablecoin_counterparties(data):
-    payload = data.get("data", data)
-    rows = payload.get("counterparties", [])
-    console.print()
-    console.print("  [bold cyan]Stablecoin counterparties[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
-    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
-    console.print(f"  [dim]window   [/dim] {payload.get('days', 0)} days")
-    console.print(f"  [dim]dir      [/dim] {payload.get('direction', 'both')}")
-    if not rows:
-        console.print("  [yellow]No stablecoin counterparties found for this wallet and filter set[/yellow]")
-        console.print()
-        return
-    print_rule()
-    for row in rows[:8]:
-        counterparty = row.get("counterparty", "unknown")
-        if len(counterparty) > 18:
-            counterparty = f"{counterparty[:8]}...{counterparty[-6:]}"
-        console.print(
-            f"  [dim]{row.get('token_symbol', ''):<5}[/dim] "
-            f"{counterparty:<20} "
-            f"{row.get('direction', ''):<8} "
-            f"{row.get('total_amount', 0)}"
-        )
-    console.print()
-
-
-def render_stablecoin_flows(data):
-    payload = data.get("data", data)
-    series = payload.get("series", [])
-    console.print()
-    console.print("  [bold cyan]Stablecoin flows[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]window   [/dim] {payload.get('hours', 0)} hours")
-    console.print(f"  [dim]interval [/dim] {payload.get('interval', 'hour')}")
-    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
-    summary = payload.get("summary", {})
-    if summary:
-        top = sorted(summary.items(), key=lambda kv: kv[1].get("total_volume", 0), reverse=True)[:4]
-        print_rule()
-        for symbol, stats in top:
-            console.print(f"  [dim]{symbol:<5}[/dim] volume {round(stats.get('total_volume', 0), 2)} · txs {stats.get('transfer_count', 0)}")
-    if not series:
-        console.print("  [yellow]No stablecoin flow activity found for this window[/yellow]")
-        console.print()
-        return
-    print_rule()
-    for row in series[:10]:
-        bucket = str(row.get("bucket", ""))[:19]
-        volume = float(row.get("total_volume") or 0)
-        bar_length = min(24, max(1, int(volume / 100000))) if volume > 0 else 0
-        bar = "█" * bar_length
-        console.print(
-            f"  [dim]{bucket}[/dim] "
-            f"{row.get('token_symbol', ''):<5} "
-            f"{bar} {round(volume, 2)}"
-        )
-    console.print()
-
-
-def render_stablecoin_large_transfers(data):
-    payload = data.get("data", data)
-    rows = payload.get("rows", [])
-    console.print()
-    console.print("  [bold cyan]Large stablecoin transfers[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
-    console.print(f"  [dim]window   [/dim] {payload.get('hours', 0)} hours")
-    console.print(f"  [dim]minimum  [/dim] {payload.get('min_amount', 0)}")
-    console.print(f"  [dim]count    [/dim] {payload.get('count', len(rows))}")
-    if not rows:
-        console.print("  [yellow]No large stablecoin transfers found for this filter set[/yellow]")
-        console.print()
-        return
-    print_rule()
-    for row in rows[:8]:
-        tx_hash = row.get("tx_hash", "")
-        short_tx = f"{tx_hash[:8]}...{tx_hash[-6:]}" if len(tx_hash) > 16 else tx_hash
-        console.print(
-            f"  [dim]{row.get('token_symbol', ''):<5}[/dim] "
-            f"{short_tx:<18} "
-            f"{row.get('amount', 0)}"
-        )
-    console.print()
-
-
-def render_wallet_stablecoin_chart(data):
-    payload = data.get("data", data)
-    rows = payload.get("rows", [])
-    console.print()
-    console.print("  [bold cyan]Wallet stablecoin chart[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
-    console.print(f"  [dim]window   [/dim] {payload.get('days', 0)} days · {payload.get('interval', 'day')}")
-    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
-    if not rows:
-        console.print("  [yellow]No stablecoin history found for this wallet and time window[/yellow]")
-        console.print()
-        return
-
-    grouped = {}
-    for row in rows:
-        token = row.get("token_symbol", "UNK")
-        grouped.setdefault(token, []).append(float(row.get("net_amount") or 0))
-
-    print_rule()
-    for token, values in list(grouped.items())[:4]:
-        latest = values[:8]
-        max_abs = max(abs(v) for v in latest) if latest else 1
-        spark = []
-        for value in latest:
-            if max_abs == 0:
-                spark.append("·")
-            elif value > 0:
-                spark.append("▇" if abs(value) / max_abs > 0.66 else "▅" if abs(value) / max_abs > 0.33 else "▃")
-            elif value < 0:
-                spark.append("▁" if abs(value) / max_abs > 0.66 else "▂" if abs(value) / max_abs > 0.33 else "·")
-            else:
-                spark.append("·")
-        console.print(f"  [dim]{token:<5}[/dim] {''.join(spark)}  net {round(sum(latest), 2)}")
-    console.print()
-
-
-def render_counterparty_chart(data):
-    payload = data.get("data", data)
-    rows = payload.get("counterparties", [])
-    console.print()
-    console.print("  [bold cyan]Stablecoin counterparty chart[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]address  [/dim] {payload.get('address', '')}")
-    console.print(f"  [dim]token    [/dim] {payload.get('token', 'all')}")
-    console.print(f"  [dim]window   [/dim] {payload.get('days', 0)} days")
-    if not rows:
-        console.print("  [yellow]No counterparties found for this filter set[/yellow]")
-        console.print()
-        return
-
-    max_amount = max(float(row.get("total_amount") or 0) for row in rows[:8]) or 1
-    print_rule()
-    for row in rows[:8]:
-        counterparty = row.get("counterparty", "unknown")
-        if len(counterparty) > 18:
-            counterparty = f"{counterparty[:8]}...{counterparty[-6:]}"
-        amount = float(row.get("total_amount") or 0)
-        bar_length = max(1, int((amount / max_amount) * 24))
-        console.print(
-            f"  [dim]{counterparty:<20}[/dim] "
-            f"{'█' * bar_length} {round(amount, 2)}"
-        )
-    console.print()
-
-
-def render_workspace_plan(name, chain, modules):
-    console.print()
-    console.print("  [bold cyan]Workspace plan[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]name     [/dim] {name}")
-    console.print(f"  [dim]chain    [/dim] {chain}")
-    console.print(f"  [dim]modules  [/dim] {', '.join(modules)}")
-    print_rule()
-    console.print("  [dim]This will map to an ephemeral investigation workspace once the VM control plane is live.[/dim]")
-    console.print("  [dim]Recommended modules: verdict, stablecoins, bridge-activity, chart[/dim]")
-    console.print()
-
-
-def render_workspace_status(data):
-    console.print()
-    console.print("  [bold cyan]Workspace[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]id       [/dim] {data.get('workspace_id', '')}")
-    console.print(f"  [dim]name     [/dim] {data.get('name', '')}")
-    console.print(f"  [dim]chain    [/dim] {data.get('chain', '')}")
-    console.print(f"  [dim]status   [/dim] {data.get('status', '')}")
-    console.print(f"  [dim]modules  [/dim] {', '.join(data.get('modules', []))}")
-    if data.get("access_url"):
-        console.print(f"  [dim]url      [/dim] {data.get('access_url')}")
-    if data.get("ssh"):
-        console.print(f"  [dim]ssh      [/dim] {data.get('ssh')}")
-    notes = data.get("notes") or []
-    if notes:
-        print_rule()
-        for note in notes[:4]:
-            console.print(f"  [dim]• {note}[/dim]")
-    print_rule()
-    if data.get("status") in {"queued", "provisioning", "planned", "terminating"}:
-        console.print(f"  [dim]Next: blockintql workspace status {data.get('workspace_id', '')}[/dim]")
-    elif data.get("status") == "ready":
-        console.print(f"  [dim]Next: blockintql workspace destroy {data.get('workspace_id', '')}[/dim]")
-    console.print()
-
-
-def render_workspace_conversation(data):
-    console.print()
-
-
-def render_workspace_review(data):
-    console.print()
-    console.print("  [bold cyan]Workspace Review[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]id       [/dim] {data.get('workspace_id', '')}")
-    console.print(f"  [dim]name     [/dim] {data.get('name') or 'Unknown'}")
-    console.print(f"  [dim]status   [/dim] {data.get('status') or 'Unknown'}")
-    activity = data.get("activity") or {}
-    if activity:
-        console.print(
-            f"  [dim]activity [/dim] "
-            f"score={activity.get('activity_score', 0)} · "
-            f"asks={activity.get('ask_count', 0)} · "
-            f"notes={activity.get('notes_count', 0)} · "
-            f"pins={activity.get('pin_count', 0)} · "
-            f"artifacts={activity.get('artifact_count', 0)}"
-        )
-        if activity.get("last_meaningful_at"):
-            detail = activity.get("last_meaningful_detail") or activity.get("last_meaningful_source") or "workspace_activity"
-            console.print(f"  [dim]last     [/dim] {activity.get('last_meaningful_at')} ({detail})")
-    brief = data.get("investigation_brief") or {}
-    if brief.get("goal"):
-        console.print(f"  [dim]goal     [/dim] {brief.get('goal')}")
-    if brief.get("seed_address"):
-        console.print(f"  [dim]seed     [/dim] {brief.get('seed_address')}")
-    actions = brief.get("recommended_actions") or []
-    if actions:
-        print_rule()
-        console.print("  [bold]Recommended next actions[/bold]")
-        for action in actions[:3]:
-            if isinstance(action, dict):
-                title = action.get("title") or action.get("id") or "action"
-                line = f"  [dim]•[/dim] {title}"
-                if action.get("surface"):
-                    line += f" [dim]({action.get('surface')})[/dim]"
-                console.print(line)
-                if action.get("description"):
-                    console.print(f"    [dim]{action.get('description')}[/dim]")
-                hint = summarize_action_hint(action)
-                if hint:
-                    console.print(f"    [dim]{hint}[/dim]")
-            else:
-                console.print(f"  [dim]•[/dim] {action}")
-    thread = data.get("workspace_conversation") or []
-    if thread:
-        print_rule()
-        console.print("  [bold]Recent conversation[/bold]")
-        for item in thread[-3:]:
-            console.print(f"  [dim]•[/dim] {item.get('goal') or '(no goal)'}")
-            reply = item.get("planner_reply") or {}
-            if reply.get("summary"):
-                console.print(f"    [dim]{reply.get('summary')}[/dim]")
-            outcomes = item.get("execution_outcomes") or ([] if not item.get("execution_outcome") else [item.get("execution_outcome")])
-            if outcomes:
-                latest = outcomes[-1]
-                if isinstance(latest, dict):
-                    detail = latest.get("detail") or latest.get("label") or latest.get("type") or "outcome"
-                    console.print(f"    [dim]latest: {detail}[/dim]")
-    console.print()
-    console.print("  [bold cyan]Workspace Conversation[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]id       [/dim] {data.get('workspace_id', '')}")
-    console.print(f"  [dim]name     [/dim] {data.get('name') or 'Unknown'}")
-    console.print(f"  [dim]status   [/dim] {data.get('status') or 'Unknown'}")
-    thread = data.get("workspace_conversation") or []
-    if not thread:
-        print_rule()
-        console.print("  [yellow]No saved asks in this workspace yet[/yellow]")
-        console.print()
-        return
-    for item in thread[-5:]:
-        print_rule()
-        console.print(f"  [bold]User Ask[/bold] [dim]{item.get('asked_at', '')}[/dim]")
-        console.print(f"  {item.get('goal') or '(no goal)'}")
-        if item.get("address"):
-            console.print(f"  [dim]seed     [/dim] {item.get('address')}")
-        if item.get("chain"):
-            console.print(f"  [dim]chain    [/dim] {item.get('chain')}")
-        reply = item.get("planner_reply") or {}
-        if reply:
-            console.print("  [bold]Planner Reply[/bold]")
-            if reply.get("summary"):
-                console.print(f"  [dim]summary  [/dim] {reply.get('summary')}")
-            if reply.get("mode"):
-                console.print(f"  [dim]mode     [/dim] {reply.get('mode')}")
-            if reply.get("recommended_surface"):
-                console.print(f"  [dim]surface  [/dim] {reply.get('recommended_surface')}")
-            if reply.get("estimated_total_credits") is not None:
-                line = f"  [dim]estimate [/dim] {reply.get('estimated_total_credits')} credits"
-                if reply.get("estimated_total_usd") is not None:
-                    line += f" · ${reply.get('estimated_total_usd')}"
-                console.print(line)
-            for action in (reply.get("recommended_actions") or [])[:3]:
-                if isinstance(action, dict):
-                    title = action.get("title") or action.get("id") or "action"
-                    console.print(f"  [dim]•[/dim] {title}")
-                    hint = summarize_action_hint(action)
-                    if hint:
-                        console.print(f"    [dim]{hint}[/dim]")
-                else:
-                    console.print(f"  [dim]•[/dim] {action}")
-        outcomes = item.get("execution_outcomes") or ([] if not item.get("execution_outcome") else [item.get("execution_outcome")])
-        if outcomes:
-            console.print("  [bold]Outcomes[/bold]")
-            for outcome in outcomes[-3:]:
-                if not isinstance(outcome, dict):
-                    continue
-                label = outcome.get("label") or outcome.get("type") or "outcome"
-                detail = outcome.get("detail") or ""
-                status = outcome.get("status")
-                status_text = f" [dim]({status})[/dim]" if status else ""
-                console.print(f"  [dim]•[/dim] {label}{status_text}")
-                if detail:
-                    console.print(f"    [dim]{detail}[/dim]")
-    console.print()
-
-
-def render_capability_catalog(data):
-    console.print()
-    console.print("  [bold cyan]Capabilities[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]surfaces [/dim] {', '.join(data.get('surfaces', []))}")
-    console.print(f"  [dim]version  [/dim] {data.get('version', 'unknown')}")
-    notes = data.get("notes") or []
-    if notes:
-        for note in notes[:2]:
-            console.print(f"  [dim]• {note}[/dim]")
-    print_rule()
-
-    grouped = {}
-    for item in data.get("capabilities", []):
-        grouped.setdefault(item.get("category", "other"), []).append(item)
-
-    for category, rows in grouped.items():
-        console.print(f"  [bold]{category.upper()}[/bold]")
-        table = Table(show_header=False, box=None, padding=(0, 2))
-        table.add_column(style="yellow", width=24)
-        table.add_column(style="white")
-        table.add_column(style="dim", justify="right", width=8)
-        for row in rows:
-            cost = row.get("estimated_cost", {}).get("credits")
-            cost_label = "Free" if cost in (None, 0) and not row.get("price_usd") else str(cost) if cost is not None else "Varies"
-            table.add_row(row.get("id", ""), row.get("description", ""), cost_label)
-        console.print(table)
-    console.print()
-
-
-def render_plan(data):
-    console.print()
-    console.print("  [bold cyan]Investigation plan[/bold cyan]")
-    print_rule()
-    console.print(f"  [dim]goal     [/dim] {data.get('goal', '')}")
-    if data.get("address"):
-        console.print(f"  [dim]address  [/dim] {data.get('address')}")
-    console.print(f"  [dim]chain    [/dim] {data.get('chain', '')}")
-    console.print(f"  [dim]surface  [/dim] {data.get('recommended_surface', 'api')}")
-    console.print(f"  [dim]estimate [/dim] {data.get('estimated_total_credits', 0)} credits · ${data.get('estimated_total_usd', 0)}")
-    if data.get("upto_budget_usd") not in (None, 0, 0.0):
-        console.print(f"  [dim]upto     [/dim] ${data.get('upto_budget_usd')} suggested ceiling")
-    if data.get("execution_mode"):
-        console.print(f"  [dim]mode     [/dim] {data.get('execution_mode')}")
-    if data.get("summary"):
-        print_rule()
-        console.print(f"  [dim]{data['summary']}[/dim]")
-    brief = data.get("investigation_brief") or {}
-    if brief.get("goal") and brief.get("goal") != data.get("goal"):
-        console.print(f"  [dim]brief    [/dim] {brief.get('goal')}")
-    if brief.get("seed_address") and brief.get("seed_address") != data.get("address"):
-        console.print(f"  [dim]seed     [/dim] {brief.get('seed_address')}")
-    if data.get("workspace_context_applied"):
-        context = data.get("workspace_context_summary") or {}
-        console.print(f"  [dim]case     [/dim] {context.get('workspace_name') or context.get('workspace_id') or 'workspace'}")
-        if context.get("last_meaningful_detail"):
-            console.print(f"  [dim]context  [/dim] {context.get('last_meaningful_detail')}")
-        recent_goals = context.get("recent_goals") or []
-        if recent_goals:
-            console.print(f"  [dim]memory   [/dim] {recent_goals[0]}")
-    steps = data.get("steps") or []
-    if steps:
-        print_rule()
-        for idx, step in enumerate(steps, start=1):
-            cost = step.get("estimated_credits")
-            cost_label = f"{cost} cr" if cost is not None else "varies"
-            console.print(f"  [bold]{idx}. {step.get('title', '')}[/bold] [dim]({step.get('surface', 'api')} · {cost_label})[/dim]")
-            console.print(f"     {step.get('rationale', '')}")
-            if step.get("endpoint"):
-                console.print(f"     [dim]endpoint:[/dim] {step['endpoint']}")
-            if step.get("cli_command"):
-                console.print(f"     [dim]cli:[/dim] {step['cli_command']}")
-    first_step = data.get("first_executable_step")
-    workspace = data.get("recommended_workspace")
-    execution_skipped = data.get("execution_skipped")
-    execution_profiles = data.get("execution_profiles") or []
-    recommended_actions = brief.get("recommended_actions") or []
-    guardrails = data.get("cost_guardrails") or {}
-    if first_step or workspace:
-        print_rule()
-    if first_step:
-        console.print(f"  [dim]first executable:[/dim] {first_step.get('title', first_step.get('capability_id', ''))}")
-    if workspace:
-        console.print(f"  [dim]workspace:[/dim] {workspace.get('name')} [{', '.join(workspace.get('modules', []))}]")
-    if execution_profiles:
-        print_rule()
-        console.print("  [bold]Execution modes[/bold]")
-        for profile in execution_profiles[:3]:
-            label = profile.get("label") or profile.get("id") or "mode"
-            credits = profile.get("estimated_credits", 0)
-            usd = profile.get("estimated_usd")
-            suffix = f" · ${usd}" if usd is not None else ""
-            console.print(f"  [dim]• {label}[/dim] {credits} credits{suffix}")
-            if profile.get("description"):
-                console.print(f"    [dim]{profile.get('description')}[/dim]")
-    if recommended_actions:
-        print_rule()
-        console.print("  [bold]Recommended next actions[/bold]")
-        for action in recommended_actions[:3]:
-            if isinstance(action, dict):
-                title = action.get("title") or action.get("id") or "action"
-                surface = action.get("surface")
-                line = f"  [dim]•[/dim] {title}"
-                if surface:
-                    line += f" [dim]({surface})[/dim]"
-                console.print(line)
-                if action.get("description"):
-                    console.print(f"    [dim]{action.get('description')}[/dim]")
-                hint = summarize_action_hint(action)
-                if hint:
-                    console.print(f"    [dim]{hint}[/dim]")
-            else:
-                console.print(f"  [dim]•[/dim] {action}")
-    if guardrails.get("message"):
-        print_rule()
-        console.print(f"  [dim]guardrail[/dim] {guardrails.get('message')}")
-    if execution_skipped:
-        print_rule()
-        console.print(f"  [yellow]execution skipped[/yellow] [dim]· {execution_skipped.get('reason', '')}[/dim]")
-        if execution_skipped.get("next"):
-            console.print(f"  [dim]{execution_skipped.get('next')}[/dim]")
-    print_rule()
-    console.print("  [dim]Next: run the first executable step directly, open the recommended workspace, or pass this plan into your own agent workflow[/dim]")
-    console.print()
-
-
-def execute_planned_first_step(plan, address):
-    step = plan.get("first_executable_step")
-    if not step:
-        steps = plan.get("steps") or []
-        if not steps:
-            return {"error": "No executable steps in plan"}
-        step = steps[0]
-
-    if not step:
-        return {"error": "No executable steps in plan"}
-    capability_id = step.get("capability_id")
-    plan_address = plan.get("address") or address
-
-    if capability_id == "verdict":
-        if not plan_address:
-            return {"error": "Address required to execute verdict"}
-        return api_post("/v1/verdict", {"address": plan_address, "chain": "ethereum"})
-
-    if capability_id == "screen":
-        if not plan_address:
-            return {"error": "Address required to execute screen"}
-        return api_post("/v1/screen", {"address": plan_address, "chain": "ethereum"})
-
-    if capability_id == "stablecoin_balances":
-        if not plan_address:
-            return {"error": "Address required to fetch stablecoin balances"}
-        return api_get(f"/v1/eth/address/{plan_address}/stablecoins")
-
-    if capability_id == "stablecoin_counterparties":
-        if not plan_address:
-            return {"error": "Address required to fetch stablecoin counterparties"}
-        return api_get(f"/v1/eth/address/{plan_address}/stablecoin-counterparties", params={"direction": "both", "days": 30, "limit": 25})
-
-    if capability_id == "stablecoin_history":
-        if not plan_address:
-            return {"error": "Address required to fetch stablecoin history"}
-        return api_get(f"/v1/eth/address/{plan_address}/stablecoin-history", params={"days": 30, "interval": "day"})
-
-    if capability_id == "stablecoin_flows":
-        return api_get("/v1/eth/stablecoins/flows", params={"hours": 24, "interval": "hour"})
-
-    return {"error": f"First planned step '{capability_id}' is not executable from ask yet"}
-
-
-def open_planned_workspace(plan, address, goal):
-    workspace = plan.get("recommended_workspace")
-    if workspace:
-        body = dict(workspace.get("payload") or {})
-        if not body.get("name"):
-            body["name"] = workspace.get("name") or "workspace"
-        if not body.get("chain"):
-            body["chain"] = plan.get("chain") or "ethereum"
-        if not body.get("modules"):
-            body["modules"] = workspace.get("modules") or ["verdict", "stablecoins", "bridge-activity", "chart"]
-        if address and "address" not in body:
-            body["address"] = address
-        return api_post("/v1/workspaces/create", body)
-
-    steps = plan.get("steps") or []
-    has_workspace = any(step.get("capability_id") == "workspace_create" for step in steps)
-    if not has_workspace:
-        return {"error": "Plan does not recommend a workspace"}
-
-    slug = "".join(c.lower() if c.isalnum() else "-" for c in (goal or "workspace"))[:32].strip("-") or "workspace"
-    modules = ["verdict", "stablecoins", "bridge-activity", "chart"]
-    if any(step.get("capability_id") == "stablecoin_counterparties" for step in steps):
-        modules.append("counterparties")
-    body = {"name": slug, "chain": "ethereum", "modules": modules}
     if address:
-        body["address"] = address
-    return api_post("/v1/workspaces/create", body)
+        cmd = cmd.replace("<address>", address)
+    if execution_profile and "--mode" not in cmd:
+        if cmd.startswith("blockintql prediction market analysis"):
+            cmd = f"{cmd} --mode {execution_profile}"
+        elif cmd.startswith("blockintql ask "):
+            cmd = f"{cmd} --mode {execution_profile}"
+    return cmd
 
 
-def should_retry_plan_without_execution(data):
-    if "error" not in data:
-        return False
-    text = f"{data.get('error', '')} {data.get('friendly_error', '')}".lower()
-    triggers = [
-        "api key required",
-        "requires available credits",
-        "x402 payment",
-        "missing api key",
-    ]
-    return any(trigger in text for trigger in triggers)
+def continue_plan_instructions(data):
+    brief = data.get("investigation_brief") or {}
+    selected_profile = data.get("selected_execution_profile") or {}
+    execution_profile = selected_profile.get("id")
+    address = (brief.get("seed_address") or data.get("address") or "").strip()
+    commands = []
+    seen_commands = set()
+    workspace_needed = False
 
+    for step in data.get("steps") or []:
+        capability_id = step.get("capability_id")
+        surface = step.get("surface")
+        execution = step.get("execution")
+        if capability_id in {"workspace_create", "graph_build"} or surface == "workspace" or execution == "interactive":
+            workspace_needed = True
+            continue
+        command = materialize_cli_command(
+            step.get("cli_command"),
+            address=address,
+            execution_profile=execution_profile,
+        )
+        if command and command not in seen_commands:
+            commands.append(command)
+            seen_commands.add(command)
+
+    if (
+        data.get("recommended_surface") == "workspace"
+        or data.get("executed_workspace")
+        or data.get("resume_workspace")
+        or data.get("recommended_workspace")
+    ):
+        workspace_needed = True
+
+    workspace_actions = []
+    if workspace_needed:
+        workspace_actions = [
+            "Run Expansion",
+            "Sync Artifacts",
+            "Hydrate Graph",
+        ]
+
+    return commands, workspace_actions
+
+
+def format_money(value):
+    if value is None:
+        return None
+    try:
+        return f"${float(value):.2f}"
+    except Exception:
+        return str(value)
 
 def output(data, agent, quiet):
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps(data, indent=2, default=str))
         return
     if "error" in data:
-        err_console.print(f"  [red]✗[/red] {data.get('friendly_error') or data['error']}")
-        if data.get("error") and data.get("friendly_error") and data["friendly_error"] != data["error"]:
-            err_console.print(f"  [dim]{data['error']}[/dim]")
-        for step in data.get("next_steps", []):
-            err_console.print(f"  [dim]{step}[/dim]")
+        err_console.print(f"  [red]✗[/red] {data['error']}")
         return
 
-    if "key_prefix" in data and "credits" in data and "tier" in data:
-        render_status(data)
+    if "reply" in data and "session_id" in data:
+        console.print()
+        console.print("  [bold cyan]BLOCKINTQL CHAT[/bold cyan]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]session  [/dim] {data.get('session_id')}")
+        console.print(f"  [dim]credits  [/dim] {data.get('credits_charged', 0)}")
+        if (data.get("session") or {}).get("seed_address"):
+            console.print(f"  [dim]seed     [/dim] {(data.get('session') or {}).get('seed_address')}")
+        console.print(f"  [dim]scope    [/dim] {data.get('scope', 'unknown')}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  {data.get('reply')}")
+        methodology = data.get("methodology") or {}
+        risk = methodology.get("risk_assessment") or {}
+        patterns = methodology.get("laundering_patterns") or []
+        if risk.get("band") or patterns:
+            console.print(f"  [dim]{'─' * 52}[/dim]")
+            if risk.get("band"):
+                console.print(f"  [dim]method   [/dim] {risk.get('band')} · score {risk.get('score')}")
+            if patterns:
+                console.print(f"  [dim]patterns [/dim] {', '.join(item.get('label') or item.get('id') for item in patterns[:4])}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print("  [dim]BlockINTQL · compliance + blockchain forensics only[/dim]")
+        console.print()
         return
 
+    # ── VERDICT ────────────────────────────────────────────────────────────────
     if "verdict" in data and "risk_score" in data:
         v = data["verdict"]
         color = verdict_color(v)
@@ -1350,17 +1025,13 @@ def output(data, agent, quiet):
         safe = data.get("safe", False)
 
         console.print()
-        console.print(
-            f"  [bold {color}]{v}[/bold {color}]  [dim]·[/dim]  "
-            f"[{color}]{risk}/100 risk[/{color}]  [dim]·[/dim]  "
-            f"[dim]{'SAFE' if safe else 'DO NOT TRANSACT'}[/dim]"
-        )
+        console.print(f"  [bold {color}]{v}[/bold {color}]  [dim]·[/dim]  [{color}]{risk}/100 risk[/{color}]  [dim]·[/dim]  [dim]{'SAFE' if safe else 'DO NOT TRANSACT'}[/dim]")
         console.print(f"  [dim]{'─' * 52}[/dim]")
 
         if not quiet:
-            addr = data.get("address") or data.get("subject", "")
+            addr = data.get('address') or data.get('subject','')
             console.print(f"  [dim]address [/dim] {addr}")
-            console.print(f"  [dim]chain   [/dim] {data.get('chain', '')}")
+            console.print(f"  [dim]chain   [/dim] {data.get('chain','')}")
             console.print(f"  [dim]entity  [/dim] {data.get('entity') or 'Unknown'}")
             if data.get("risk_indicators"):
                 console.print(f"  [dim]flags   [/dim] [{color}]{', '.join(data['risk_indicators'])}[/{color}]")
@@ -1369,259 +1040,364 @@ def output(data, agent, quiet):
             if data.get("provider_data"):
                 pd = data["provider_data"]
                 console.print(f"  [dim]{'─' * 52}[/dim]")
-                console.print(f"  [dim]{pd.get('provider', '').upper()} · local · key never sent to BlockINTQL[/dim]")
+                console.print(f"  [dim]{pd.get('provider','').upper()} · local · key never sent to BlockINTQL[/dim]")
                 if pd.get("entity_name"):
                     console.print(f"  [dim]entity  [/dim] {pd['entity_name']}")
-                console.print(f"  [dim]risk    [/dim] {pd.get('risk_score', 0)}/100")
+                if pd.get("canonical_category"):
+                    console.print(f"  [dim]class   [/dim] {pd.get('canonical_category')}")
+                console.print(f"  [dim]risk    [/dim] {pd.get('risk_score',0)}/100")
+                if pd.get("recommended_verdict"):
+                    console.print(f"  [dim]policy  [/dim] {pd.get('recommended_verdict')} · {pd.get('confidence','unknown')} confidence")
                 if pd.get("sanctions_hit"):
                     console.print(f"  [red]  ⚠  SANCTIONS HIT[/red]")
+                elif pd.get("reasons"):
+                    console.print(f"  [dim]why     [/dim] {pd.get('reasons')[0]}")
             if data.get("narrative"):
                 console.print(f"  [dim]{'─' * 52}[/dim]")
                 console.print(f"  [dim]{data['narrative'][:300]}[/dim]")
 
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print("  [dim]BlockINTQL · blockintql.com[/dim]")
+        console.print(f"  [dim]BlockINTQL · blockintql.com[/dim]")
         console.print()
         return
 
+    if "verdict" in data and "findings" in data:
+        color = verdict_color(data.get("verdict"))
+        findings = data.get("findings") or {}
+        methodology = data.get("methodology") or {}
+        risk = methodology.get("risk_assessment") or {}
+        console.print()
+        console.print(f"  [bold {color}]{data.get('verdict')}[/bold {color}]  [dim]·[/dim]  [{color}]{findings.get('max_risk_score', 0)}/100 risk[/{color}]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]chain    [/dim] {data.get('chain', '')}")
+        console.print(f"  [dim]subjects [/dim] {data.get('addresses_analyzed', 0)} address(es)")
+        plan = data.get("execution_plan") or {}
+        if plan.get("mode"):
+            console.print(f"  [dim]mode     [/dim] {plan.get('mode')}")
+        if data.get("narrative"):
+            console.print(f"  [dim]summary  [/dim] {data.get('narrative')}")
+        if risk.get("band"):
+            console.print(f"  [dim]method   [/dim] {risk.get('band')} · score {risk.get('score')}")
+        patterns = methodology.get("laundering_patterns") or []
+        if patterns:
+            console.print(f"  [dim]patterns [/dim] {', '.join(item.get('label') or item.get('id') for item in patterns[:4])}")
+        if findings.get("sanctions_hits"):
+            console.print(f"  [dim]sanctions[/dim] {len(findings.get('sanctions_hits') or [])} hit(s)")
+        if findings.get("aml_flags"):
+            console.print(f"  [dim]aml      [/dim] {', '.join(str(flag) for flag in (findings.get('aml_flags') or [])[:4])}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print("  [dim]BlockINTQL · methodology-grounded analysis[/dim]")
+        console.print()
+        return
+
+    # ── PROFILE ────────────────────────────────────────────────────────────────
     if "profile" in data:
         found = data.get("found", False)
         console.print()
         status = "[bold green]█ FOUND[/bold green]" if found else "[dim]█ NOT FOUND[/dim]"
         console.print(f"  {status}")
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print(f"  [dim]identifier[/dim] {data['identifier']} ({data.get('identifier_type', '')})")
+        console.print(f"  [dim]identifier[/dim] {data['identifier']} ({data.get('identifier_type','')})")
         if found:
             p = data.get("profile", {})
             if p.get("entity_name"):
                 console.print(f"  [dim]entity    [/dim] {p['entity_name']}")
-            console.print(f"  [dim]risk      [/dim] {p.get('risk_score', 0)}/100")
+            console.print(f"  [dim]risk      [/dim] {p.get('risk_score',0)}/100")
             for addr in p.get("linked_bitcoin_addresses", [])[:5]:
                 console.print(f"  [dim]btc       [/dim] {addr}")
             for l in p.get("linked_identifiers", [])[:5]:
                 console.print(f"  [dim]linked    [/dim] {l['identifier']} ({l['type']})")
         console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print("  [dim]BlockINTQL · OP_RETURN identity graph · blockintql.com[/dim]")
+        console.print(f"  [dim]BlockINTQL · OP_RETURN identity graph · blockintql.com[/dim]")
         console.print()
         return
 
-    if "tx_summary" in data and "transactions_traced" in data:
-        render_trace(data)
+    # ── ACCOUNT / STATUS ──────────────────────────────────────────────────────
+    if "credits" in data and ("tier" in data or "key_prefix" in data):
+        console.print()
+        console.print("  [bold green]ACCOUNT OK[/bold green]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]key      [/dim] {data.get('key_prefix', 'Unknown')}")
+        console.print(f"  [dim]email    [/dim] {data.get('email') or 'Unknown'}")
+        console.print(f"  [dim]org      [/dim] {data.get('org') or 'Unknown'}")
+        console.print(f"  [dim]tier     [/dim] {data.get('tier') or 'Unknown'}")
+        console.print(f"  [dim]credits  [/dim] {data.get('credits', 0)}")
+        if data.get("display_name"):
+            console.print(f"  [dim]name     [/dim] {data['display_name']}")
+        if data.get("created_at"):
+            console.print(f"  [dim]created  [/dim] {data['created_at']}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]BlockINTQL · blockintql.com[/dim]")
+        console.print()
         return
 
-    if "query" in data and "guidance" in data and "summary" in data and "data" in data:
-        render_opreturn_search(data)
-        return
-
-    if "tx_hash" in data and "found" in data and "guidance" in data:
-        render_opreturn_tx(data)
-        return
-
-    if ("stablecoin_balances" in data.get("data", {}) or "stablecoin_balances" in data) and "coverage" in data.get("data", data):
-        render_stablecoin_balances(data)
-        return
-
-    if "rows" in data.get("data", {}) and "interval" in data.get("data", {}) and "days" in data.get("data", {}):
-        render_stablecoin_history(data)
-        return
-
-    if "counterparties" in data.get("data", {}) and "direction" in data.get("data", {}):
-        render_stablecoin_counterparties(data)
-        return
-
-    if "series" in data.get("data", {}) and "summary" in data.get("data", {}):
-        render_stablecoin_flows(data)
-        return
-
-    if "rows" in data.get("data", {}) and "min_amount" in data.get("data", {}):
-        render_stablecoin_large_transfers(data)
-        return
-
-    if "workspace_id" in data and "modules" in data and "status" in data:
-        render_workspace_status(data)
-        return
-
-    if "investigation_brief" in data and "workspace_conversation" in data and "activity" in data:
-        render_workspace_review(data)
-        return
-
-    if "workspace_conversation" in data:
-        render_workspace_conversation(data)
-        return
-
-    if "capabilities" in data and "surfaces" in data:
-        render_capability_catalog(data)
-        return
-
-    if "goal" in data and "steps" in data and "estimated_total_credits" in data:
-        render_plan(data)
+    # ── PLAN / WORKSPACE ──────────────────────────────────────────────────────
+    if "recommended_surface" in data and "steps" in data:
+        console.print()
+        execution_mode = data.get("execution_mode", "plan_only")
+        mode_label = {
+            "plan_only": "PLAN READY",
+            "created_workspace_from_plan": "WORKSPACE CREATED",
+        }.get(execution_mode, execution_mode.upper())
+        console.print(f"  [bold cyan]{mode_label}[/bold cyan]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        brief = data.get("investigation_brief") or {}
+        budget = data.get("budget") or {}
+        intent = data.get("intent") or {}
+        console.print(f"  [dim]surface  [/dim] {data.get('recommended_surface', 'unknown')}")
+        if intent.get("label"):
+            console.print(f"  [dim]mode     [/dim] {intent.get('label')}")
+        console.print(f"  [dim]credits  [/dim] {data.get('estimated_total_credits', 0)}")
+        if data.get("estimated_total_usd") is not None:
+            console.print(f"  [dim]usd      [/dim] {format_money(data.get('estimated_total_usd'))}")
+        if budget.get("credits") is not None or budget.get("usd") is not None:
+            budget_bits = []
+            if budget.get("credits") is not None:
+                budget_bits.append(f"{budget.get('credits')} credits")
+            if budget.get("usd") is not None:
+                budget_bits.append(format_money(budget.get("usd")))
+            console.print(f"  [dim]budget   [/dim] {' · '.join(bit for bit in budget_bits if bit)}")
+        if brief.get("goal"):
+            console.print(f"  [dim]you asked[/dim] {brief['goal']}")
+        if brief.get("seed_address"):
+            console.print(f"  [dim]seed     [/dim] {brief['seed_address']}")
+        elif data.get("address"):
+            console.print(f"  [dim]seed     [/dim] {data.get('address')}")
+        if data.get("workspace_context_applied"):
+            context = data.get("workspace_context_summary") or {}
+            console.print(f"  [dim]case     [/dim] {context.get('workspace_name') or context.get('workspace_id') or 'workspace'}")
+            if context.get("last_meaningful_detail"):
+                console.print(f"  [dim]context  [/dim] {context.get('last_meaningful_detail')}")
+            recent_goals = context.get("recent_goals") or []
+            if recent_goals:
+                console.print(f"  [dim]memory   [/dim] {recent_goals[0]}")
+        if data.get("summary"):
+            console.print(f"  [dim]summary  [/dim] {data['summary']}")
+        if data.get("executed_workspace"):
+            workspace = data["executed_workspace"]
+            console.print(f"  [dim]workspace[/dim] {workspace.get('workspace_id', 'queued')}")
+            console.print(f"  [dim]status   [/dim] {workspace.get('status', 'unknown')}")
+            if workspace.get("poll_url"):
+                console.print(f"  [dim]poll     [/dim] {workspace['poll_url']}")
+        elif data.get("resume_workspace"):
+            workspace = data["resume_workspace"]
+            console.print(f"  [dim]resume   [/dim] {workspace.get('name') or workspace.get('workspace_id')}")
+            console.print(f"  [dim]status   [/dim] {workspace.get('status', 'unknown')}")
+            activity = workspace.get("activity") or {}
+            console.print(
+                f"  [dim]activity [/dim] score={activity.get('activity_score', 0)} · "
+                f"asks={activity.get('ask_count', 0)} · "
+                f"notes={activity.get('notes_count', 0)} · "
+                f"pins={activity.get('pin_count', 0)} · "
+                f"artifacts={activity.get('artifact_count', 0)}"
+            )
+            if activity.get("last_meaningful_at"):
+                detail = activity.get("last_meaningful_detail") or activity.get("last_meaningful_source") or "workspace_activity"
+                console.print(f"  [dim]last     [/dim] {activity.get('last_meaningful_at')} ({detail})")
+            if workspace.get("reason"):
+                console.print(f"  [dim]reason   [/dim] {workspace.get('reason')}")
+        elif data.get("recommended_workspace"):
+            workspace = data["recommended_workspace"]
+            console.print(f"  [dim]workspace[/dim] {workspace.get('name', 'recommended')}")
+            console.print(f"  [dim]modules  [/dim] {', '.join(workspace.get('modules', []))}")
+            if workspace.get("graph_step_capability_id"):
+                console.print(f"  [dim]graph    [/dim] {workspace.get('graph_step_capability_id')}")
+            payload = workspace.get("payload") or {}
+            if payload.get("goal"):
+                console.print(f"  [dim]brief    [/dim] {payload.get('goal')}")
+            if payload.get("seed_address"):
+                console.print(f"  [dim]seed     [/dim] {payload.get('seed_address')}")
+        steps = summarize_plan_steps(data.get("steps") or [])
+        if steps:
+            console.print("  [dim]copilot plan[/dim]")
+            for step in steps[:6]:
+                console.print(f"    {step['idx']}. {step['title']} [dim]({step['surface']}{step['optional']})[/dim]")
+                if step["reason"]:
+                    console.print(f"       [dim]{step['reason']}[/dim]")
+        selected_profile = data.get("selected_execution_profile") or {}
+        if selected_profile.get("label"):
+            line = f"  [dim]selected [/dim] {selected_profile.get('label')}"
+            if selected_profile.get("id"):
+                line += f" [dim]({selected_profile.get('id')})[/dim]"
+            console.print(line)
+            if selected_profile.get("description"):
+                console.print(f"  [dim]profile  [/dim] {selected_profile.get('description')}")
+        profiles = data.get("execution_profiles") or []
+        if profiles:
+            console.print("  [dim]execution modes[/dim]")
+            for profile in profiles[:3]:
+                label = profile.get("label") or profile.get("id") or "mode"
+                line = f"    • {label}: {profile.get('estimated_credits', 0)} credits"
+                if profile.get("estimated_usd") is not None:
+                    line += f" / {format_money(profile.get('estimated_usd'))}"
+                console.print(line)
+                if profile.get("description"):
+                    console.print(f"      [dim]{profile.get('description')}[/dim]")
+                if profile.get("step_titles"):
+                    console.print(f"      [dim]{' → '.join(profile.get('step_titles')[:4])}[/dim]")
+        if data.get("execution_skipped"):
+            console.print(f"  [dim]next     [/dim] {data['execution_skipped'].get('next', '')}")
+        recommended_actions = brief.get("recommended_actions") or []
+        if recommended_actions:
+            console.print("  [dim]recommended next actions[/dim]")
+            for action in recommended_actions[:3]:
+                if isinstance(action, dict):
+                    title = action.get("title") or action.get("id") or "action"
+                    surface = action.get("surface")
+                    line = f"    • {title}"
+                    if surface:
+                        line += f" [dim]({surface})[/dim]"
+                    console.print(line)
+                    if action.get("description"):
+                        console.print(f"      [dim]{action.get('description')}[/dim]")
+                else:
+                    console.print(f"    • {action}")
+        continue_commands, workspace_actions = continue_plan_instructions(data)
+        if continue_commands or workspace_actions:
+            selected_label = (selected_profile.get("label") or "").strip()
+            heading = "continue with selected mode" if selected_label else "continue with this plan"
+            console.print(f"  [dim]{heading}[/dim]")
+            for command in continue_commands[:4]:
+                console.print(f"    [cyan]$[/cyan] {command}")
+            if workspace_actions:
+                console.print("    [dim]Then in the workspace:[/dim]")
+                for idx, action in enumerate(workspace_actions, start=1):
+                    console.print(f"      {idx}. {action}")
+        guardrails = data.get("cost_guardrails") or {}
+        if guardrails.get("message"):
+            console.print(f"  [dim]guardrail[/dim] {guardrails.get('message')}")
+        if data.get("execution_error"):
+            err = data["execution_error"]
+            console.print(f"  [red]error    [/red] {err.get('detail', err)}")
+        if data.get("ask_history_warning"):
+            console.print(f"  [yellow]history  [/yellow] {data.get('ask_history_warning')}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]BlockINTQL · blockintql.com[/dim]")
+        console.print()
         return
 
     if "workspaces" in data and isinstance(data.get("workspaces"), list):
         console.print()
-        console.print("  [bold cyan]Workspaces[/bold cyan]")
-        print_rule()
+        console.print("  [bold cyan]WORKSPACES[/bold cyan]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
         for workspace in data.get("workspaces") or []:
+            summary = (workspace.get("workspace_context") or {}).get("goal") or "No investigation brief yet"
             activity = workspace.get("activity") or {}
+            notes_count = activity.get("notes_count", 0)
+            pin_count = activity.get("pin_count", 0)
+            ask_count = activity.get("ask_count", 0)
+            artifact_count = activity.get("artifact_count", 0)
+            score = activity.get("activity_score", 0)
+            last_meaningful_at = activity.get("last_meaningful_at")
+            last_meaningful_source = activity.get("last_meaningful_source")
             resume_badge = " [green](best resume)[/green]" if workspace.get("_resume_candidate") else ""
             console.print(f"  [bold]{workspace.get('name') or workspace.get('workspace_id')}[/bold]{resume_badge}")
             console.print(f"  [dim]id       [/dim] {workspace.get('workspace_id')}")
             console.print(f"  [dim]status   [/dim] {workspace.get('status') or 'unknown'}")
-            console.print(
-                f"  [dim]state    [/dim] "
-                f"asks={activity.get('ask_count', 0)} · "
-                f"notes={activity.get('notes_count', 0)} · "
-                f"pins={activity.get('pin_count', 0)} · "
-                f"artifacts={activity.get('artifact_count', 0)} · "
-                f"score={activity.get('activity_score', 0)}"
-            )
+            console.print(f"  [dim]modules  [/dim] {', '.join(workspace.get('modules') or []) or 'none'}")
+            console.print(f"  [dim]brief    [/dim] {summary}")
+            console.print(f"  [dim]state    [/dim] asks={ask_count} · notes={notes_count} · pins={pin_count} · artifacts={artifact_count} · score={score}")
+            if last_meaningful_at:
+                detail = activity.get("last_meaningful_detail") or last_meaningful_source or "workspace_activity"
+                console.print(f"  [dim]last     [/dim] {last_meaningful_at} ({detail})")
             if workspace.get("reason"):
                 console.print(f"  [dim]reason   [/dim] {workspace.get('reason')}")
-            print_rule()
+            console.print(f"  [dim]{'─' * 52}[/dim]")
+        return
+
+    if "summary" in data and "workspace_active" in data and "recent_refunds" in data:
+        console.print()
+        console.print("  [bold cyan]VM AUDIT[/bold cyan]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        summary = data.get("summary") or {}
+        console.print(f"  [dim]workspace active [/dim] {summary.get('workspace_active', 0)}")
+        console.print(f"  [dim]warehouse active [/dim] {summary.get('warehouse_active', 0)}")
+        console.print(f"  [dim]destroyed recent [/dim] {summary.get('workspace_destroyed_recent', 0)}")
+        console.print(f"  [dim]refunds recent   [/dim] {summary.get('warehouse_refunds_recent', 0)}")
+        policy = data.get("cleanup_policy") or {}
+        console.print(f"  [dim]ttl policy       [/dim] workspace idle {policy.get('workspace_idle_ttl_hours')}h · max {policy.get('workspace_max_ttl_hours')}h · warehouse {policy.get('warehouse_grace_minutes')}m")
+        if data.get("warehouse_active"):
+            console.print("  [dim]active warehouse[/dim]")
+            for row in (data.get("warehouse_active") or [])[:5]:
+                console.print(f"    • {row.get('query_id')} · {row.get('status')} · {row.get('vm_name') or 'no-vm'}")
+        if data.get("recent_refunds"):
+            console.print("  [dim]recent refunds[/dim]")
+            for row in (data.get("recent_refunds") or [])[:5]:
+                console.print(f"    • {row.get('query_id')} · +{row.get('refunded_credits', 0)} credits · {row.get('cleanup_reason') or row.get('status')}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print("  [dim]BlockINTQL admin audit[/dim]")
+        console.print()
+        return
+
+    if "workspace_id" in data and "status" in data and "poll_url" in data:
+        console.print()
+        console.print("  [bold cyan]WORKSPACE[/bold cyan]")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]id       [/dim] {data.get('workspace_id')}")
+        console.print(f"  [dim]name     [/dim] {data.get('name') or 'Unknown'}")
+        console.print(f"  [dim]chain    [/dim] {data.get('chain') or 'Unknown'}")
+        console.print(f"  [dim]status   [/dim] {data.get('status') or 'Unknown'}")
+        console.print(f"  [dim]provider [/dim] {data.get('provider') or 'Unknown'}")
+        if data.get("modules"):
+            console.print(f"  [dim]modules  [/dim] {', '.join(data.get('modules') or [])}")
+        context = data.get("workspace_context") or {}
+        if context.get("goal"):
+            console.print(f"  [dim]brief    [/dim] {context.get('goal')}")
+        if context.get("seed_address"):
+            console.print(f"  [dim]seed     [/dim] {context.get('seed_address')}")
+        if data.get("access_url"):
+            console.print(f"  [dim]access   [/dim] {data['access_url']}")
+        if data.get("graph_url"):
+            console.print(f"  [dim]graph    [/dim] {data['graph_url']}")
+        if data.get("search_url"):
+            console.print(f"  [dim]search   [/dim] {data['search_url']}")
+        if data.get("ssh"):
+            console.print(f"  [dim]ssh      [/dim] {data['ssh']}")
+        if data.get("poll_url"):
+            console.print(f"  [dim]poll     [/dim] {data['poll_url']}")
+        if data.get("destroy_url"):
+            console.print(f"  [dim]destroy  [/dim] {data['destroy_url']}")
+        if data.get("error_message"):
+            console.print(f"  [red]error    [/red] {data['error_message']}")
+        for note in data.get("notes") or []:
+            console.print(f"  [dim]note     [/dim] {note}")
+        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(f"  [dim]BlockINTQL · blockintql.com[/dim]")
+        console.print()
         return
 
     if not quiet:
         console.print_json(json.dumps(data, default=str))
 
 
-
-def display_analytics_table(result):
-    """Display analytics results as a Rich table."""
-    columns = result.get("columns", [])
-    rows = result.get("rows", [])
-    
-    if not rows:
-        console.print("[yellow]No results found[/yellow]")
-        return
-    
-    # Create table
-    table = Table(box=box.ROUNDED, border_style="blue")
-    
-    # Add columns
-    for col in columns:
-        table.add_column(col.replace("_", " ").title(), style="cyan")
-    
-    # Add rows (limit to 50 for display)
-    for row in rows[:50]:
-        table.add_row(*[str(row.get(col, "")) for col in columns])
-    
-    console.print()
-    console.print(table)
-    console.print()
-    console.print(f"[dim]Showing {min(len(rows), 50)} of {len(rows)} results[/dim]")
-
-def display_analytics_chart(result):
-    """Display analytics results as ASCII bar chart."""
-    rows = result.get("rows", [])
-    columns = result.get("columns", [])
-    
-    if not rows or len(columns) < 2:
-        console.print("[yellow]Not enough data for chart[/yellow]")
-        return
-    
-    # Assume first column is label, second is value
-    label_col = columns[0]
-    value_col = columns[1]
-    
-    console.print(f"\n[bold]{value_col.replace('_', ' ').title()}[/bold]\n")
-    
-    # Get max value for scaling
-    max_val = max(float(row.get(value_col, 0)) for row in rows[:20])
-    
-    # Display bars
-    for row in rows[:20]:
-        label = str(row.get(label_col, ""))[:20]
-        value = float(row.get(value_col, 0))
-        bar_length = int((value / max_val) * 50) if max_val > 0 else 0
-        bar = "█" * bar_length
-        console.print(f"{label:20} {bar} {value:,.0f}")
-    
-    console.print()
 provider_opts = [
-    click.option(
-        "--provider",
-        "-p",
-        default=None,
-        type=click.Choice(["chainalysis", "trm", "elliptic", "crystal", "merkle_science", "nomis", "generic"]),
-        help="Attribution provider (key stays on your machine)",
-    ),
-    click.option(
-        "--provider-key",
-        default=None,
-        envvar="BLOCKINTQL_PROVIDER_KEY",
-        help="Provider API key — never sent to BlockINTQL",
-    ),
-    click.option(
-        "--provider-url",
-        default=None,
-        help="Custom provider URL template with {address} placeholder",
-    ),
+    click.option("--provider", "-p", default=None,
+                 type=click.Choice(["chainalysis","trm","elliptic","arkham","metamask","generic"]),
+                 help="Attribution provider (key stays on your machine)"),
+    click.option("--provider-key", default=None, envvar="BLOCKINTQL_PROVIDER_KEY",
+                 help="Provider API key — never sent to BlockINTQL"),
+    click.option("--provider-url", default=None,
+                 help="Custom provider URL template with {address} placeholder"),
 ]
 
-
 def with_provider(f):
-    for opt in reversed(provider_opts):
-        f = opt(f)
+    for opt in reversed(provider_opts): f = opt(f)
     return f
 
-
-class CustomGroup(click.Group):
-    def format_help(self, ctx, formatter):
-        # Delegate to our custom branded help
-        cli.invoke(ctx)
-
-@click.group(cls=CustomGroup, invoke_without_command=True)
+@click.group(invoke_without_command=True)
 @click.version_option(__version__, prog_name="blockintql")
 @click.pass_context
 def cli(ctx):
-    """BlockINTQL — Sovereign Blockchain Intelligence CLI"""
+    """BlockINTQL — Sovereign Blockchain Intelligence CLI
+
+    Your provider key never leaves your machine.
+    BlockINTQL only receives the address being screened.
+    """
     if ctx.invoked_subcommand is None:
         console.print(BLOCKINTQL_BANNER)
-        v = __version__
-        credits = fetch_credits()
-        key = get_api_key()
-        # Status line
-        if key:
-            status = f"[green]●[/green] authenticated"
-            if credits is not None:
-                status += f" · [bold]{credits:,}[/bold] credits"
-            else:
-                status += " · [dim]credits: unknown[/dim]"
-        else:
-            status = "[red]●[/red] no API key — run: blockintql init"
-        console.print(f"  [dim]v{v}[/dim]  {status}")
+        click.echo(ctx.get_help())
         console.print()
-        console.print("  [bold]SETUP[/bold]")
-        console.print("    init              Generate API key")
-        console.print("    auth              Save existing API key")
-        console.print("    buy               Purchase credits via Stripe")
-        console.print("    pay               Configure x402 USDC payments")
-        console.print("    status            Check key & credit balance")
-        console.print()
-        console.print("  [bold]INTELLIGENCE[/bold]")
-        console.print("    verdict           Screen address — CLEAR / CAUTION / BLOCK")
-        console.print("    screen            Full risk screening with narrative")
-        console.print()
-        console.print("  [bold]ANALYSIS[/bold]")
-        console.print("    analyze           AI-powered wallet analysis")
-        console.print("    query             Natural language wallet and stablecoin query")
-        console.print("    capabilities      List supported CLI capabilities")
-        console.print()
-        console.print("  [bold]DATA[/bold]")
-        console.print("    providers         List enrichment providers")
-        console.print("    stablecoins       Stablecoin intelligence and wallet views")
-        console.print("    chart             Terminal-native chart views")
-        console.print()
-        console.print("  [bold]COMMUNITY[/bold]  [dim](free)[/dim]")
-        console.print("    report            Report address(es) for review")
-        console.print("    list-categories   Valid reporting categories")
-        console.print("    label-search      Search address labels")
-        console.print("    leaderboard       Attribution leaderboard")
-        console.print("    set-name          Set your display name")
-        console.print()
-        console.print("  [dim]Docs: https://blockintql.com/docs/blockintql · GitHub: github.com/block6iq/blockintql-cli[/dim]")
-        console.print()
-
+        console.print("[dim]Wallet-based access:[/] [bold]blockintql login --auto-pay --max-payment 0.10[/]")
 
 @cli.command()
 @click.option("--api-key", required=True)
@@ -1636,50 +1412,70 @@ def auth(api_key, provider):
     console.print("[green]Saved API configuration.[/]")
     console.print("[dim]Keep provider keys in environment variables instead of config files.[/]")
 
-
 @cli.command()
-@click.argument("address")
-@click.option("--chain", "-c", default="bitcoin", type=click.Choice(["bitcoin", "ethereum"]))
+@click.option("--address", "-a", required=True)
+@click.option("--chain", "-c", default="auto", type=click.Choice(["auto","bitcoin","ethereum"]))
 @click.option("--context", default="")
 @with_provider
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def verdict(address, chain, context, provider, provider_key, provider_url, agent, quiet):
-    if not agent and sys.stdout.isatty():
-        if not show_credit_cost("verdict"):
-            return
+    """Get a CLEAR/CAUTION/BLOCK verdict.
+
+    \b
+    Privacy: BlockINTQL receives address+chain only.
+    Provider key stays on your machine.
+
+    \b
+    Examples:
+      blockintql verdict --address 1A1zP1e...
+      blockintql verdict --address 0x123... --provider chainalysis --provider-key $KEY
+    """
+    chain = infer_chain_from_value(address, fallback="bitcoin") if chain == "auto" else chain
     config = load_config()
     provider = provider or config.get("default_provider")
     if not quiet and not agent:
         p_info = f" + {provider} (local)" if provider else ""
         console.print(f"[dim]Screening {address[:20]}...{p_info}[/]")
 
+    # STEP 1: BlockINTQL gets address+chain ONLY
     result = api_post("/v1/verdict", {"address": address, "chain": chain, "context": context})
 
+    # STEP 2: Provider called directly from YOUR machine — key never sent to BlockINTQL
     if provider and "error" not in result:
         result = enrich_with_provider(result, address, chain, provider, provider_key, provider_url)
 
     output(result, agent, quiet)
 
-
 @cli.command()
-@click.argument("address")
-@click.option("--chain", "-c", default="bitcoin", type=click.Choice(["bitcoin", "ethereum"]))
+@click.option("--address", "-a", required=True)
+@click.option("--chain", "-c", default="auto", type=click.Choice(["auto","bitcoin","ethereum"]))
 @with_provider
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def screen(address, chain, provider, provider_key, provider_url, agent, quiet):
-    if not agent and sys.stdout.isatty():
-        if not show_credit_cost("screen"):
-            return
+    """Screen a counterparty before transacting.
+
+    \b
+    Privacy: Your provider key never touches BlockINTQL servers.
+    Provider is called directly from your machine.
+
+    \b
+    Examples:
+      blockintql screen --address 1A1zP1e...
+      blockintql screen --address 0x123... --provider trm --provider-key $KEY
+    """
+    chain = infer_chain_from_value(address, fallback="bitcoin") if chain == "auto" else chain
     config = load_config()
     provider = provider or config.get("default_provider")
     if not quiet and not agent:
         p_info = f" + {provider} (local)" if provider else ""
         console.print(f"[dim]Screening {address[:20]}...{p_info}[/]")
 
+    # STEP 1: BlockINTQL gets address+chain ONLY
     result = api_post("/v1/screen", {"address": address, "chain": chain})
 
+    # STEP 2: Provider called directly from YOUR machine — key never sent to BlockINTQL
     if provider and "error" not in result:
         result = enrich_with_provider(result, address, chain, provider, provider_key, provider_url)
 
@@ -1687,81 +1483,503 @@ def screen(address, chain, provider, provider_key, provider_url, agent, quiet):
 
 
 @cli.command()
-@click.argument("query", required=False)
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def history(address_arg, address, chain, limit, agent, quiet):
+    """Fetch unified Ethereum wallet history (native + token transfers)."""
+    address = coalesce_address(address_arg, address)
+    if not address:
+        raise click.UsageError("Provide an address as an argument or with --address")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading {chain} history for {address[:20]}...[/]")
+    result = api_get(f"/v1/eth/address/{address}/history", {"limit": limit})
+    output(result, agent, quiet)
+
+
+@cli.command("tx")
+@click.option("--txid", "-t", required=True)
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def tx_lookup(txid, chain, agent, quiet):
+    """Fetch verbose Ethereum transaction details."""
+    if not str(txid).startswith("0x") or len(str(txid)) != 66:
+        raise click.UsageError("Ethereum transaction hashes must be passed as 0x-prefixed 66-character values.")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading {chain} transaction {txid[:20]}...[/]")
+    result = api_get(f"/v1/eth/tx/{txid}/verbose")
+    output(result, agent, quiet)
+
+
+@cli.group(cls=DefaultingGroup, invoke_without_command=True)
+@click.pass_context
+def stablecoins(ctx):
+    """Ethereum stablecoin analytics commands.
+
+    Examples:
+      blockintql stablecoins 0xabc...
+      blockintql stablecoins --address 0xabc...
+      blockintql stablecoins history 0xabc... --days 30
+      blockintql stablecoins counterparties 0xabc... --days 30
+      blockintql stablecoins flows --hours 24
+      blockintql stablecoins large-transfers --hours 24 --min-amount 1000000
+    """
+    if ctx.invoked_subcommand:
+        return
+    examples = [
+        "blockintql stablecoins 0xabc...",
+        "blockintql stablecoins --address 0xabc...",
+        "blockintql stablecoins balances 0xabc...",
+        "blockintql stablecoins history 0xabc... --days 30",
+        "blockintql stablecoins counterparties 0xabc... --days 30",
+        "blockintql stablecoins flows --hours 24",
+        "blockintql stablecoins large-transfers --hours 24 --min-amount 1000000",
+    ]
+    if not sys.stdout.isatty():
+        click.echo(json.dumps({
+            "group": "stablecoins",
+            "description": "Ethereum stablecoin analytics commands.",
+            "examples": examples,
+        }, indent=2))
+        return
+
+    console.print("[yellow]Choose a stablecoin command or pass an address to default to balances.[/]")
+    console.print("[dim]Examples:[/]")
+    for example in examples:
+        console.print(f"[dim]  {example}[/]")
+
+
+@cli.group()
+def chart():
+    """Render terminal-native charts for supported analytics endpoints."""
+
+
+@chart.command("stablecoin-flows")
+@click.option("--hours", default=24, show_default=True, type=int)
+@click.option("--interval", default="hour", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chart_stablecoin_flows(hours, interval, token, agent, quiet):
+    """Render a terminal chart for network stablecoin flow series."""
+    if not quiet and not agent:
+        console.print("[dim]Rendering stablecoin flow chart...[/]")
+    params = {"hours": hours, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get("/v1/eth/stablecoins/flows", params, timeout=180)
+    if agent or not sys.stdout.isatty() or "error" in result:
+        output(result, agent, quiet)
+        return
+    render_stablecoin_flow_chart(result, hours=hours, interval=interval, token=token)
+
+
+@chart.command("wallet-stablecoins")
+@click.argument("address")
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--interval", default="day", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chart_wallet_stablecoins(address, days, interval, token, agent, quiet):
+    """Render a terminal chart for wallet stablecoin history."""
+    if not quiet and not agent:
+        console.print(f"[dim]Rendering wallet stablecoin chart for {address[:20]}...[/]")
+    params = {"days": days, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params, timeout=90)
+    if agent or not sys.stdout.isatty() or "error" in result:
+        output(result, agent, quiet)
+        return
+    render_wallet_stablecoin_chart(result, address=address, days=days, token=token)
+
+
+@chart.command("wallet-stablecoin-balances")
+@click.argument("address")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chart_wallet_stablecoin_balances(address, agent, quiet):
+    """Render a terminal chart for current wallet stablecoin balances."""
+    if not quiet and not agent:
+        console.print(f"[dim]Rendering wallet stablecoin balances chart for {address[:20]}...[/]")
+    result = api_get(f"/v1/eth/address/{address}/stablecoins", timeout=90)
+    if agent or not sys.stdout.isatty() or "error" in result:
+        output(result, agent, quiet)
+        return
+    render_wallet_stablecoin_balances_chart(result, address=address)
+
+
+@chart.command("counterparties")
+@click.argument("address")
+@click.option("--token", default=None)
+@click.option("--direction", default="both", show_default=True, type=click.Choice(["inbound", "outbound", "both"]))
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chart_counterparties(address, token, direction, days, limit, agent, quiet):
+    """Render a terminal chart for stablecoin counterparties."""
+    if not quiet and not agent:
+        console.print(f"[dim]Rendering counterparty chart for {address[:20]}...[/]")
+    params = {"direction": direction, "days": days, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params, timeout=90)
+    if agent or not sys.stdout.isatty() or "error" in result:
+        output(result, agent, quiet)
+        return
+    render_counterparty_chart(result, address=address, token=token)
+
+
+@stablecoins.command("balances")
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_balances(address_arg, address, agent, quiet):
+    """Fetch major stablecoin balances for an Ethereum wallet."""
+    address = coalesce_address(address_arg, address)
+    if not address:
+        raise click.UsageError("Provide an address as an argument or with --address")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading stablecoin balances for {address[:20]}...[/]")
+    result = api_get(f"/v1/eth/address/{address}/stablecoins")
+    output(result, agent, quiet)
+
+
+@stablecoins.command("history")
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--interval", default="day", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_history(address_arg, address, days, interval, token, agent, quiet):
+    """Fetch time-bucketed stablecoin history for an Ethereum wallet."""
+    address = coalesce_address(address_arg, address)
+    if not address:
+        raise click.UsageError("Provide an address as an argument or with --address")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading stablecoin history for {address[:20]}...[/]")
+    params = {"days": days, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params)
+    output(result, agent, quiet)
+
+
+@stablecoins.command("counterparties")
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--token", default=None)
+@click.option("--direction", default="both", show_default=True, type=click.Choice(["inbound", "outbound", "both"]))
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_counterparties(address_arg, address, token, direction, days, limit, agent, quiet):
+    """Fetch top stablecoin counterparties for an Ethereum wallet."""
+    address = coalesce_address(address_arg, address)
+    if not address:
+        raise click.UsageError("Provide an address as an argument or with --address")
+    if not quiet and not agent:
+        console.print(f"[dim]Loading stablecoin counterparties for {address[:20]}...[/]")
+    params = {"direction": direction, "days": days, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params)
+    output(result, agent, quiet)
+
+
+@stablecoins.command("flows")
+@click.option("--hours", default=24, show_default=True, type=int)
+@click.option("--interval", default="hour", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_flows(hours, interval, token, agent, quiet):
+    """Fetch network-level Ethereum stablecoin flow series."""
+    if not quiet and not agent:
+        console.print("[dim]Loading stablecoin flow series...[/]")
+    params = {"hours": hours, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get("/v1/eth/stablecoins/flows", params, timeout=180)
+    output(result, agent, quiet)
+
+
+@stablecoins.command("large-transfers")
+@click.option("--min-amount", default=100000, show_default=True, type=float)
+@click.option("--hours", default=24, show_default=True, type=int)
+@click.option("--token", default=None)
+@click.option("--limit", default=100, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def stablecoins_large_transfers(min_amount, hours, token, limit, agent, quiet):
+    """Fetch large Ethereum stablecoin transfers."""
+    if not quiet and not agent:
+        console.print("[dim]Loading large stablecoin transfers...[/]")
+    params = {"min_amount": min_amount, "hours": hours, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get("/v1/eth/stablecoins/large-transfers", params)
+    output(result, agent, quiet)
+
+
+@cli.group()
+def eth():
+    """Ethereum-first command namespace."""
+
+
+@eth.command("history")
+@click.argument("address")
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_history(address, limit, agent, quiet):
+    """Fetch unified Ethereum wallet history."""
+    result = api_get(f"/v1/eth/address/{address}/history", {"limit": limit})
+    output(result, agent, quiet)
+
+
+@eth.command("tx")
+@click.argument("txid")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_tx(txid, agent, quiet):
+    """Fetch verbose Ethereum transaction details."""
+    result = api_get(f"/v1/eth/tx/{txid}/verbose")
+    output(result, agent, quiet)
+
+
+@eth.command("verdict")
+@click.argument("address")
+@click.option("--context", default="")
+@with_provider
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_verdict(address, context, provider, provider_key, provider_url, agent, quiet):
+    """Get a verdict for an Ethereum address."""
+    result = api_post("/v1/verdict", {"address": address, "chain": "ethereum", "context": context})
+    if provider and "error" not in result:
+        result = enrich_with_provider(result, address, "ethereum", provider, provider_key, provider_url)
+    output(result, agent, quiet)
+
+
+@eth.command("screen")
+@click.argument("address")
+@with_provider
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_screen(address, provider, provider_key, provider_url, agent, quiet):
+    """Screen an Ethereum address."""
+    result = api_post("/v1/screen", {"address": address, "chain": "ethereum"})
+    if provider and "error" not in result:
+        result = enrich_with_provider(result, address, "ethereum", provider, provider_key, provider_url)
+    output(result, agent, quiet)
+
+
+@eth.group("stablecoins")
+def eth_stablecoins():
+    """Ethereum stablecoin analytics namespace."""
+
+
+@eth_stablecoins.command("balances")
+@click.argument("address")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_stablecoins_balances(address, agent, quiet):
+    result = api_get(f"/v1/eth/address/{address}/stablecoins")
+    output(result, agent, quiet)
+
+
+@eth_stablecoins.command("history")
+@click.argument("address")
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--interval", default="day", show_default=True, type=click.Choice(["hour", "day"]))
+@click.option("--token", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_stablecoins_history(address, days, interval, token, agent, quiet):
+    params = {"days": days, "interval": interval}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params)
+    output(result, agent, quiet)
+
+
+@eth_stablecoins.command("counterparties")
+@click.argument("address")
+@click.option("--token", default=None)
+@click.option("--direction", default="both", show_default=True, type=click.Choice(["inbound", "outbound", "both"]))
+@click.option("--days", default=30, show_default=True, type=int)
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def eth_stablecoins_counterparties(address, token, direction, days, limit, agent, quiet):
+    params = {"direction": direction, "days": days, "limit": limit}
+    if token:
+        params["token"] = token
+    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params)
+    output(result, agent, quiet)
+
+
+@cli.command()
+@click.option("--surface", default="cli", type=click.Choice(["api", "cli", "mcp"]))
+@click.option("--category", default=None)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def capabilities(surface, category, agent, quiet):
+    """List discoverable capabilities and their CLI examples."""
+    params = {"surface": surface}
+    if category:
+        params["category"] = category
+    result = api_get("/v1/capabilities", params, require_auth=False)
+    output(result, agent, quiet)
+
+@cli.command()
+@click.argument("query", nargs=-1)
 @click.option("--address", "-a", multiple=True)
-@click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin", "ethereum", "both"]))
-@click.option("--format", "fmt", default="full", type=click.Choice(["full", "graph", "narrative"]))
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin","ethereum","both"]))
+@click.option("--format", "fmt", default="full", type=click.Choice(["full","graph","narrative"]))
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def analyze(query, address, chain, fmt, agent, quiet):
-    if not query and not address:
+    """Run autonomous multi-agent analysis."""
+    query_text = " ".join(query).strip()
+    if not query_text and not address:
         raise click.UsageError("Provide a QUERY or --address")
     if not quiet and not agent:
         console.print("[dim]Running autonomous analysis...[/]")
-    result = api_post(
-        "/v1/analyze",
-        {"query": query or "", "addresses": list(address), "chain": chain, "output_format": fmt},
-    )
+    result = api_post("/v1/analyze", {"query": query_text, "addresses": list(address),
+                                       "chain": chain, "output_format": fmt}, timeout=180)
     output(result, agent, quiet)
 
-
-@cli.command(hidden=True)
-@click.argument("identifier")
-@click.option(
-    "--type",
-    "id_type",
-    default="auto",
-    type=click.Choice(["auto", "email", "telegram", "twitter", "phone", "btc_address", "eth_address", "pgp_fingerprint"]),
-)
+@cli.command()
+@click.option("--identifier", "-i", required=True)
+@click.option("--type", "id_type", default="auto",
+              type=click.Choice(["auto","email","telegram","twitter","phone",
+                                  "btc_address","eth_address","pgp_fingerprint"]))
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def profile(identifier, id_type, agent, quiet):
+    """Search OP_RETURN identity graph — unique on-chain data."""
     if not quiet and not agent:
-        console.print("[dim]Searching identity graph...[/]")
+        console.print(f"[dim]Searching identity graph...[/]")
     result = api_get("/v1/profile/search", {"identifier": identifier, "type": id_type})
     output(result, agent, quiet)
 
-
-@cli.command(hidden=True)
+@cli.command()
 @click.option("--txid", "-t", required=True)
 @click.option("--hops", default=5)
-@click.option("--method", default="fifo", type=click.Choice(["fifo", "lifo"]))
+@click.option("--method", default="fifo", type=click.Choice(["fifo","lifo"]))
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def trace(txid, hops, method, agent, quiet):
+    """Trace funds with FIFO/LIFO accounting."""
     if not quiet and not agent:
         console.print(f"[dim]Tracing {txid[:20]}... ({hops} hops)[/]")
     result = api_post("/v1/trace", {"txid": txid, "hops": hops, "method": method})
     output(result, agent, quiet)
 
-
 @cli.command()
-@click.argument("query")
+@click.argument("query", nargs=-1, required=True)
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def query(query, agent, quiet):
-    if not quiet and not agent:
-        console.print("[dim]Processing...[/]")
-    result = api_post("/v1/intelligence/search", {"query": query})
+    """Natural language blockchain intelligence."""
+    query_text = " ".join(query).strip()
+    if not quiet and not agent: console.print("[dim]Processing...[/]")
+    result = api_post("/v1/intelligence/search", {"query": query_text})
     output(result, agent, quiet)
 
 
 @cli.command()
-@click.argument("goal")
+@click.argument("message", nargs=-1, required=True)
+@click.option("--session-id", default=None, help="Continue an existing BlockINTQL chat session.")
+@click.option("--address", "-a", default=None, help="Optional address to anchor the chat turn.")
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin", "ethereum"]))
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def chat(message, session_id, address, chain, agent, quiet):
+    """Scoped multi-turn compliance and blockchain forensics chat."""
+    message_text = " ".join(message).strip()
+    if not quiet and not agent:
+        console.print("[dim]Chatting with BlockINTQL...[/]")
+    payload = {"message": message_text, "chain": chain}
+    if session_id:
+        payload["session_id"] = session_id
+    if address:
+        payload["address"] = address
+    result = api_post("/v1/chat", payload, require_auth=True, timeout=120)
+    output(result, agent, quiet)
+
+@cli.command()
+@click.argument("goal", nargs=-1, required=True)
 @click.option("--address", "-a", default=None)
 @click.option("--workspace-id", default=None, help="Continue an existing workspace instead of starting fresh.")
-@click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin", "ethereum"]))
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin","ethereum"]))
 @click.option("--budget-credits", type=int, default=None)
 @click.option("--budget-usd", type=float, default=None)
 @click.option("--upto-budget-usd", type=float, default=None)
-@click.option("--surface", "prefer_surface", default="auto", type=click.Choice(["auto", "api", "cli", "mcp", "workspace"]))
-@click.option("--execute-first-step", is_flag=True, help="Execute the first recommended sync step after planning")
+@click.option("--mode", "execution_mode", type=click.Choice(["cheap", "standard", "deep"]), default=None, help="Choose which execution profile to plan around.")
 @click.option("--open-workspace", is_flag=True, help="Prefer workspace execution and open a workspace when possible.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-def ask(goal, address, workspace_id, chain, budget_credits, budget_usd, upto_budget_usd, prefer_surface, execute_first_step, open_workspace, agent, quiet):
+def ask(goal, address, workspace_id, chain, budget_credits, budget_usd, upto_budget_usd, execution_mode, open_workspace, agent, quiet):
+    """Plan an investigation and optionally open a workspace."""
+    goal_text = " ".join(goal).strip()
     if not quiet and not agent:
-        console.print("[dim]Planning investigation workflow...[/]")
+        console.print("[dim]Planning investigation...[/]")
+    run_ask_flow(
+        goal_text,
+        address=address,
+        workspace_id=workspace_id,
+        chain=chain,
+        budget_credits=budget_credits,
+        budget_usd=budget_usd,
+        upto_budget_usd=upto_budget_usd,
+        open_workspace=open_workspace,
+        mode=execution_mode,
+        agent=agent,
+        quiet=quiet,
+    )
+
+
+@cli.group()
+def prediction():
+    """Prediction-market investigation commands."""
+
+
+@prediction.group()
+def market():
+    """Prediction-market workflows for Ethereum investigations."""
+
+
+@market.command("analysis")
+@click.argument("address_arg", required=False)
+@click.option("--address", "-a", required=False)
+@click.option("--workspace-id", default=None, help="Continue an existing workspace instead of starting fresh.")
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
+@click.option("--budget-credits", type=int, default=None)
+@click.option("--budget-usd", type=float, default=None)
+@click.option("--upto-budget-usd", type=float, default=None)
+@click.option("--mode", "execution_mode", type=click.Choice(["cheap", "standard", "deep"]), default=None, help="Choose which execution profile to plan around.")
+@click.option("--open-workspace/--plan-only", default=True, show_default=True, help="Open the recommended workspace for deeper prediction-market analysis.")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def prediction_market_analysis(address_arg, address, workspace_id, chain, budget_credits, budget_usd, upto_budget_usd, execution_mode, open_workspace, agent, quiet):
+    """Plan or open a prediction-market investigation workflow."""
+    address = coalesce_address(address_arg, address)
+    if not quiet and not agent:
+        console.print("[dim]Planning prediction-market investigation...[/]")
+    goal = "Investigate prediction market exposure, counterparties, venue interactions, and event-driven flows"
     run_ask_flow(
         goal,
         address=address,
@@ -1770,218 +1988,288 @@ def ask(goal, address, workspace_id, chain, budget_credits, budget_usd, upto_bud
         budget_credits=budget_credits,
         budget_usd=budget_usd,
         upto_budget_usd=upto_budget_usd,
-        prefer_surface=prefer_surface,
-        execute_first_step=execute_first_step,
         open_workspace=open_workspace,
+        mode=execution_mode,
         agent=agent,
         quiet=quiet,
     )
 
-
-
-@cli.command(hidden=True)
-@click.argument("query_text")
-@click.option("--format", "fmt", default="table", type=click.Choice(["table", "json", "chart"]))
-@click.option("--agent", is_flag=True)
-@click.option("--quiet", "-q", is_flag=True)
-def analytics(query_text, fmt, agent, quiet):
-    """Run analytics queries with instant results from materialized views.
-    
-    Examples:
-      blockintql analytics "daily active users"
-      blockintql analytics "top 50 USDT holders"
-      blockintql analytics "token launches last week"
-    """
-    if not agent and sys.stdout.isatty():
-        if not show_credit_cost("analytics"):
-            return
-    
-    if not quiet and not agent:
-        console.print("[dim]Running analytics query...[/]")
-    
-    result = api_post("/v1/analytics", {"query": query_text})
-    
-    if agent or fmt == "json":
-        click.echo(json.dumps(result, indent=2))
-        return
-    
-    if "error" in result:
-        err_console.print(f"  [red]✗[/red] {result['error']}")
-        return
-    
-    # Format as table or chart
-    if fmt == "table":
-        display_analytics_table(result)
-    elif fmt == "chart":
-        display_analytics_chart(result)
-    
-    if not agent and sys.stdout.isatty():
-        show_credit_after("analytics")
 @cli.command()
 @click.option("--agent", is_flag=True)
 def providers(agent):
+    """List attribution providers — all called locally, keys never leave your machine."""
     data = list_providers()
     if agent or not sys.stdout.isatty():
         click.echo(json.dumps(data, indent=2))
         return
-    t = Table(
-        title="Attribution Providers (all local — keys never sent to BlockINTQL)",
-        box=box.ROUNDED,
-        border_style="blue",
-    )
+    t = Table(title="Attribution Providers (all local — keys never sent to BlockINTQL)",
+              box=box.ROUNDED, border_style="blue")
     t.add_column("Provider", style="bold yellow")
+    t.add_column("Description")
     t.add_column("Key Required")
     for p in data:
-        t.add_row(p["name"], "No" if p["name"] in ("generic",) else "Yes")
+        t.add_row(p["name"], p["description"], "No" if p["name"] in ("metamask","generic") else "Yes")
     console.print(t)
 
-
-@cli.group()
-def stablecoins():
-    """Stablecoin intelligence commands."""
-
-
-@stablecoins.command("balances")
-@click.argument("address")
+@cli.command()
+@click.option("--install", is_flag=True)
 @click.option("--agent", is_flag=True)
-@click.option("--quiet", "-q", is_flag=True)
-def stablecoin_balances(address, agent, quiet):
-    if not quiet and not agent:
-        console.print(f"[dim]Loading stablecoin balances for {address[:20]}...[/]")
-    result = api_get(f"/v1/eth/address/{address}/stablecoins")
-    output(result, agent, quiet)
+def skills(install, agent):
+    """List capabilities or install into agent context."""
+    if install:
+        r = httpx.get(f"{API_BASE}/skills/skill.md", timeout=10)
+        click.echo(r.text)
+        return
+    if agent or not sys.stdout.isatty():
+        click.echo(json.dumps({
+            "commands": ["verdict","screen","history","tx","eth","stablecoins","chart","prediction","analyze","profile","trace","query","chat","ask","workspace","wallet","capabilities","providers","status","admin"],
+            "providers": [p["name"] for p in list_providers()],
+            "privacy": "Provider keys never leave your machine",
+            "mcp_server": "https://blockintql-mcp-385334043904.us-central1.run.app/mcp",
+            "source": "https://github.com/block6iq/blockintql-cli",
+        }, indent=2))
+        return
+    t = Table(title="BlockINTQL CLI", box=box.ROUNDED, border_style="blue")
+    t.add_column("Command", style="bold yellow", width=12)
+    t.add_column("Description")
+    t.add_column("Example")
+    rows = [
+        ("verdict","CLEAR/CAUTION/BLOCK","blockintql verdict --address 1ABC..."),
+        ("screen","Screen + provider","blockintql screen --address 0x123... --provider trm --provider-key $KEY"),
+        ("history","Ethereum wallet history","blockintql history --address 0x123..."),
+        ("tx","Verbose Ethereum tx","blockintql tx --txid 0xabc..."),
+        ("eth","Ethereum-first namespace","blockintql eth stablecoins history 0x123..."),
+        ("stablecoins","Ethereum stablecoin analytics","blockintql stablecoins history --address 0x123..."),
+        ("chart","Terminal-native charts","blockintql chart wallet-stablecoin-balances 0x123..."),
+        ("prediction","Prediction-market workflow","blockintql prediction market analysis 0x123..."),
+        ("analyze","Multi-agent analysis",'blockintql analyze "check for sanctions"'),
+        ("profile","OP_RETURN identity","blockintql profile --identifier @handle"),
+        ("trace","FIFO/LIFO tracing","blockintql trace --txid abc123..."),
+        ("query","Natural language",'blockintql query "is this safe?"'),
+        ("ask","Plan or open workspace",'blockintql ask "Investigate this wallet" --address 0x123...'),
+        ("workspace","Manage workspaces","blockintql workspace review <workspace_id>"),
+        ("wallet","Wallet-backed access","blockintql wallet status"),
+        ("capabilities","Discover supported commands","blockintql capabilities --category stablecoins"),
+        ("chat","Scoped compliance + blockchain forensics conversation","blockintql chat \"Explain the sanctions risk for 0x...\" --address 0x..."),
+        ("providers","List providers","blockintql providers"),
+        ("skills","Agent skills","blockintql skills --install >> CONTEXT.md"),
+    ]
+    for r in rows: t.add_row(*r)
+    console.print(t)
+    console.print("\n[dim]Provider keys stay on your machine. BlockINTQL only sees the address.[/]")
+    console.print("[dim]Source: github.com/block6iq/blockintql-cli[/]")
 
-
-@stablecoins.command("history")
-@click.argument("address")
-@click.option("--days", default=30, type=int)
-@click.option("--interval", default="day", type=click.Choice(["hour", "day"]))
-@click.option("--token", default=None)
-@click.option("--agent", is_flag=True)
-@click.option("--quiet", "-q", is_flag=True)
-def stablecoin_history(address, days, interval, token, agent, quiet):
-    if not quiet and not agent:
-        console.print(f"[dim]Building stablecoin history for {address[:20]}...[/]")
-    params = {"days": days, "interval": interval}
-    if token:
-        params["token"] = token
-    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params=params)
-    output(result, agent, quiet)
-
-
-@stablecoins.command("counterparties")
-@click.argument("address")
-@click.option("--token", default=None)
-@click.option("--direction", default="both", type=click.Choice(["inbound", "outbound", "both"]))
-@click.option("--days", default=30, type=int)
-@click.option("--limit", default=25, type=int)
-@click.option("--agent", is_flag=True)
-@click.option("--quiet", "-q", is_flag=True)
-def stablecoin_counterparties(address, token, direction, days, limit, agent, quiet):
-    if not quiet and not agent:
-        console.print(f"[dim]Resolving stablecoin counterparties for {address[:20]}...[/]")
-    params = {"direction": direction, "days": days, "limit": limit}
-    if token:
-        params["token"] = token
-    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params=params)
-    output(result, agent, quiet)
-
-
-@stablecoins.command("flows")
-@click.option("--hours", default=24, type=int)
-@click.option("--interval", default="hour", type=click.Choice(["hour", "day"]))
-@click.option("--token", default=None)
-@click.option("--agent", is_flag=True)
-@click.option("--quiet", "-q", is_flag=True)
-def stablecoin_flows(hours, interval, token, agent, quiet):
-    if not quiet and not agent:
-        console.print("[dim]Loading network stablecoin flows...[/]")
-    params = {"hours": hours, "interval": interval}
-    if token:
-        params["token"] = token
-    result = api_get("/v1/eth/stablecoins/flows", params=params)
-    output(result, agent, quiet)
-
-
-@stablecoins.command("large-transfers")
-@click.option("--min-amount", default=100000, type=float)
-@click.option("--hours", default=24, type=int)
-@click.option("--token", default=None)
-@click.option("--limit", default=100, type=int)
-@click.option("--agent", is_flag=True)
-@click.option("--quiet", "-q", is_flag=True)
-def stablecoin_large_transfers(min_amount, hours, token, limit, agent, quiet):
-    if not quiet and not agent:
-        console.print("[dim]Loading large stablecoin transfers...[/]")
-    params = {"min_amount": min_amount, "hours": hours, "limit": limit}
-    if token:
-        params["token"] = token
-    result = api_get("/v1/eth/stablecoins/large-transfers", params=params)
-    output(result, agent, quiet)
+@cli.command()
+@click.option("--cdp-key-id", default=None, envvar="BLOCKINTQL_CDP_KEY_ID")
+@click.option("--auto-pay", is_flag=True)
+@click.option("--max-payment", default=0.10)
+def pay(cdp_key_id, auto_pay, max_payment):
+    """Store local payment preferences for wallet-backed billing flows."""
+    config = load_config()
+    payment_config = {"type": "cdp", "auto_pay": auto_pay, "max_payment_usd": max_payment}
+    payment_config["cdp_key_id"] = cdp_key_id or os.environ.get("BLOCKINTQL_CDP_KEY_ID")
+    payment_config["private_key_env"] = "BLOCKINTQL_CDP_PRIVATE_KEY"
+    config["payment"] = payment_config
+    save_config(config)
+    console.print("[green]Saved local payment preferences (wallet session).[/]")
+    console.print(f"[green]Auto-pay preference: {'enabled' if auto_pay else 'disabled'} | Max: ${max_payment}[/]")
+    console.print("[dim]Wallet secrets are not persisted by this command. Keep them in your wallet session manager or environment.[/]")
 
 
 @cli.group()
-def chart():
-    """Terminal-native chart views."""
+def wallet():
+    """Connect and inspect wallet-backed payment access."""
 
 
-@chart.command("stablecoin-flows")
-@click.option("--hours", default=24, type=int)
-@click.option("--interval", default="hour", type=click.Choice(["hour", "day"]))
-@click.option("--token", default=None)
-@click.option("--agent", is_flag=True)
-def chart_stablecoin_flows(hours, interval, token, agent):
-    params = {"hours": hours, "interval": interval}
-    if token:
-        params["token"] = token
-    result = api_get("/v1/eth/stablecoins/flows", params=params)
-    output(result, agent, False)
+def _configure_cdp_wallet(auto_pay, max_payment, cdp_key_id, agent, *, command_name="wallet connect"):
+    if cdp_key_id:
+        os.environ["BLOCKINTQL_CDP_KEY_ID"] = cdp_key_id
 
+    configured_key_id = cdp_key_id or os.environ.get("BLOCKINTQL_CDP_KEY_ID")
+    configured_private_key = os.environ.get("BLOCKINTQL_CDP_PRIVATE_KEY")
+    if not configured_key_id or not configured_private_key:
+        message = {
+            "error": "No wallet session credentials found for CDP mode.",
+            "next_step": "Set BLOCKINTQL_CDP_KEY_ID and BLOCKINTQL_CDP_PRIVATE_KEY, then rerun login.",
+            "example": "export BLOCKINTQL_CDP_KEY_ID='...'; export BLOCKINTQL_CDP_PRIVATE_KEY='-----BEGIN ...'",
+        }
+        if agent or not sys.stdout.isatty():
+            click.echo(json.dumps(message, indent=2))
+        else:
+            err_console.print("[red]No wallet session credentials found for CDP mode.[/]")
+            console.print("[dim]Next step:[/] export BLOCKINTQL_CDP_KEY_ID='...'")
+            console.print("[dim]            export BLOCKINTQL_CDP_PRIVATE_KEY='-----BEGIN ...'")
+            console.print(f"[dim]Then run:[/] blockintql {command_name} --auto-pay --max-payment 0.10")
+        return False
 
-@chart.command("wallet-stablecoins")
-@click.argument("address")
-@click.option("--days", default=30, type=int)
-@click.option("--interval", default="day", type=click.Choice(["hour", "day"]))
-@click.option("--token", default=None)
-@click.option("--agent", is_flag=True)
-def chart_wallet_stablecoins(address, days, interval, token, agent):
-    params = {"days": days, "interval": interval}
-    if token:
-        params["token"] = token
-    result = api_get(f"/v1/eth/address/{address}/stablecoin-history", params=params)
+    config = load_config()
+    payment_config = {
+        "type": "cdp",
+        "auto_pay": auto_pay,
+        "max_payment_usd": max_payment,
+        "cdp_key_id": configured_key_id,
+        "private_key_env": "BLOCKINTQL_CDP_PRIVATE_KEY",
+    }
+    config["payment"] = payment_config
+    save_config(config)
+
+    result = {
+        "wallet_type": "cdp",
+        "auto_pay": auto_pay,
+        "max_payment_usd": max_payment,
+        "api_key_required": False,
+        "ready": True,
+        "next": [
+            "unset BLOCKINTQL_API_KEY",
+            "blockintql verdict --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --agent",
+        ],
+    }
     if agent or not sys.stdout.isatty():
-        output(result, agent, False)
-        return
-    if "error" in result:
-        output(result, agent, False)
-        return
-    render_wallet_stablecoin_chart(result)
+        click.echo(json.dumps(result, indent=2))
+        return True
+    console.print("[green]Wallet connected for x402 access (cdp).[/]")
+    console.print(f"[green]Auto-pay: {'enabled' if auto_pay else 'disabled'} | Max payment: ${max_payment}[/]")
+    console.print("[dim]No API key is required for wallet-backed x402 requests.[/]")
+    console.print("[dim]Next:[/] unset BLOCKINTQL_API_KEY")
+    console.print("[dim]Try:[/] blockintql verdict --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --agent")
+    return True
 
 
-@chart.command("counterparties")
-@click.argument("address")
-@click.option("--token", default=None)
-@click.option("--direction", default="both", type=click.Choice(["inbound", "outbound", "both"]))
-@click.option("--days", default=30, type=int)
-@click.option("--limit", default=25, type=int)
+@cli.command("login")
+@click.option("--auto-pay", is_flag=True, default=True)
+@click.option("--max-payment", default=0.10, show_default=True, type=float)
+@click.option("--cdp-key-id", default=None, envvar="BLOCKINTQL_CDP_KEY_ID")
 @click.option("--agent", is_flag=True)
-def chart_counterparties(address, token, direction, days, limit, agent):
-    params = {"direction": direction, "days": days, "limit": limit}
-    if token:
-        params["token"] = token
-    result = api_get(f"/v1/eth/address/{address}/stablecoin-counterparties", params=params)
+def login(auto_pay, max_payment, cdp_key_id, agent):
+    """Connect a wallet session for no-key x402 access."""
+    _configure_cdp_wallet(auto_pay, max_payment, cdp_key_id, agent, command_name="login")
+
+
+@wallet.command("connect")
+@click.option("--auto-pay", is_flag=True, default=True)
+@click.option("--max-payment", default=0.10, show_default=True, type=float)
+@click.option("--cdp-key-id", default=None, envvar="BLOCKINTQL_CDP_KEY_ID")
+@click.option("--agent", is_flag=True)
+def wallet_connect(auto_pay, max_payment, cdp_key_id, agent):
+    """Configure wallet-based access so x402 requests can run with no API key."""
+    _configure_cdp_wallet(auto_pay, max_payment, cdp_key_id, agent)
+
+
+@wallet.command("status")
+@click.option("--agent", is_flag=True)
+def wallet_status(agent):
+    """Show current wallet-based payment readiness."""
+    config = load_config()
+    payment_config = load_payment_config(config)
+    if not payment_config:
+        payload = {"ready": False, "configured": False, "message": "No wallet payment configuration found."}
+        if agent or not sys.stdout.isatty():
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            console.print("[yellow]No wallet payment configuration found.[/]")
+            console.print("[dim]Run:[/] blockintql login --auto-pay --max-payment 0.10")
+        return
+
+    env_names = [payment_config.private_key_env]
+    if payment_config.wallet_type == "cdp":
+        env_names = ["BLOCKINTQL_CDP_PRIVATE_KEY"]
+    ready = any(os.environ.get(name) for name in env_names) and bool(
+        payment_config.cdp_key_id or os.environ.get("BLOCKINTQL_CDP_KEY_ID")
+    )
+    payload = {
+        "configured": True,
+        "ready": ready,
+        "wallet_type": payment_config.wallet_type,
+        "auto_pay": payment_config.auto_pay,
+        "max_payment_usd": payment_config.max_payment_usd,
+        "private_key_env": payment_config.private_key_env,
+        "api_key_required": False,
+    }
     if agent or not sys.stdout.isatty():
-        output(result, agent, False)
+        click.echo(json.dumps(payload, indent=2))
         return
-    if "error" in result:
-        output(result, agent, False)
+    if ready:
+        console.print(f"[green]Wallet access is ready ({payment_config.wallet_type}).[/]")
+    else:
+        console.print(f"[yellow]Wallet config exists but the shell is missing {payment_config.private_key_env}.[/]")
+    console.print(f"[dim]Auto-pay:[/] {'enabled' if payment_config.auto_pay else 'disabled'}")
+    console.print(f"[dim]Max payment:[/] ${payment_config.max_payment_usd}")
+
+@cli.command()
+@click.option("--agent", is_flag=True)
+def status(agent):
+    """Check authenticated account status."""
+    output(api_get("/v1/me"), agent, False)
+
+
+@cli.command()
+@click.option("--email", "-e", default="", help="Optional email for Stripe receipt / fallback delivery")
+@click.option("--pack", default="starter", type=click.Choice(["starter","pro"]),
+              help="starter=$10/1000 screens · pro=$40/5000 screens")
+@click.option("--agent", is_flag=True)
+def buy(email, pack, agent):
+    """
+    Buy a credit pack and top up your current API key.
+
+    \b
+    Examples:
+      blockintql buy
+      blockintql buy --pack pro
+      blockintql buy --pack pro --email you@example.com
+    """
+    import webbrowser
+    if not agent:
+        console.print("[dim]Creating checkout...[/]")
+    body = {"pack": pack}
+    if email:
+        body["email"] = email
+    api_key = get_api_key()
+    if api_key:
+        body["api_key"] = api_key
+    result = api_post("/v1/billing/checkout", body, require_auth=False)
+    if "error" in result and not result.get("free_tier_exhausted"):
+        err_console.print(f"  [red]✗[/red] {result['error']}")
         return
-    render_counterparty_chart(result)
+    checkout_url = result.get("checkout_url")
+    if not checkout_url:
+        err_console.print("[red]Could not create checkout session[/]")
+        return
+    if agent or not sys.stdout.isatty():
+        click.echo(json.dumps({"checkout_url": checkout_url, "pack": pack, "email": email or None, "api_key_attached": bool(api_key)}, indent=2))
+        return
+    console.print(f"  [dim]Pack:[/dim]  {'$10 — 1,000 screens' if pack == 'starter' else '$40 — 5,000 screens'}")
+    console.print(f"  [dim]Email:[/dim] {email or 'Not provided'}")
+    console.print(f"  [dim]Target:[/dim] {'Current API key' if api_key else 'No API key attached'}")
+    console.print(f"  [dim]URL:[/dim]   {checkout_url}")
+    console.print()
+    try:
+        webbrowser.open(checkout_url)
+        console.print("[dim]Browser opened. Complete payment to add credits.[/]")
+    except:
+        console.print("[dim]Copy the URL above to complete payment.[/]")
+    console.print("[dim]After payment run:[/dim] blockintql status")
 
 
 @cli.group()
 def workspace():
     """Manage investigation workspaces."""
+
+
+@cli.group()
+def admin():
+    """Operator and audit commands."""
+
+
+@admin.command("vm-audit")
+@click.option("--limit", default=25, type=int)
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def admin_vm_audit(limit, agent, quiet):
+    """Inspect active Ubicloud VMs, cleanup state, and recent refunds."""
+    if not quiet and not agent:
+        console.print("[dim]Fetching VM audit view...[/]")
+    result = admin_api_get("/v1/admin/audit/vms", params={"limit": limit})
+    output(result, agent, quiet)
 
 
 @workspace.command("create")
@@ -1993,16 +2281,16 @@ def workspace():
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_create(name, chain, modules, goal, seed_address, agent, quiet):
-    module_list = [m.strip() for m in modules.split(",") if m.strip()]
+    """Create a provisioned investigation workspace."""
+    module_list = [item.strip() for item in modules.split(",") if item.strip()]
     payload = {"name": name, "chain": chain, "modules": module_list}
     if goal.strip():
         payload["goal"] = goal.strip()
     if seed_address.strip():
         payload["seed_address"] = seed_address.strip()
     if not quiet and not agent:
-        console.print("[dim]Provisioning investigation workspace...[/]")
-    result = api_post("/v1/workspaces/create", payload, require_auth=True)
-    output(result, agent, quiet)
+        console.print("[dim]Creating workspace...[/]")
+    output(api_post("/v1/workspaces/create", payload, require_auth=True), agent, quiet)
 
 
 @workspace.command("list")
@@ -2010,6 +2298,7 @@ def workspace_create(name, chain, modules, goal, seed_address, agent, quiet):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_list(limit, agent, quiet):
+    """List your recent investigation workspaces."""
     data = api_get("/v1/workspaces", params={"limit": limit}, require_auth=True)
     workspaces = data.get("workspaces") if isinstance(data, dict) else None
     if workspaces:
@@ -2030,8 +2319,8 @@ def workspace_list(limit, agent, quiet):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_status(workspace_id, agent, quiet):
-    result = api_get(f"/v1/workspaces/{workspace_id}", require_auth=True)
-    output(result, agent, quiet)
+    """Get workspace status."""
+    output(api_get(f"/v1/workspaces/{workspace_id}", require_auth=True), agent, quiet)
 
 
 @workspace.command("destroy")
@@ -2039,10 +2328,10 @@ def workspace_status(workspace_id, agent, quiet):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_destroy(workspace_id, agent, quiet):
+    """Destroy a workspace."""
     if not quiet and not agent:
         console.print("[dim]Destroying workspace...[/]")
-    result = api_post(f"/v1/workspaces/{workspace_id}/destroy", {}, require_auth=True)
-    output(result, agent, quiet)
+    output(api_post(f"/v1/workspaces/{workspace_id}/destroy", {}, require_auth=True), agent, quiet)
 
 
 @workspace.command("open")
@@ -2050,18 +2339,20 @@ def workspace_destroy(workspace_id, agent, quiet):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_open(workspace_id, agent, quiet):
+    """Open the workspace explorer if it is ready."""
+    import webbrowser
+
     data = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
-    workspace_data = data.get("workspace", data) if isinstance(data, dict) else data
-    output(workspace_data, agent, quiet)
+    workspace = data.get("workspace", data) if isinstance(data, dict) else data
+    reason = "Opened directly from the CLI workspace command."
+    output(workspace, agent, quiet)
     if agent or quiet or not sys.stdout.isatty():
         return
     url = workspace_launch_url(data)
     if not url:
         console.print("[yellow]Workspace is not ready to open yet.[/]")
         return
-    url = _with_query_params(url, {"resume": "1", "resume_reason": "Opened directly from the CLI workspace command.", "resume_source": "workspace_open"})
-    import webbrowser
-
+    url = _with_query_params(url, {"resume": "1", "resume_reason": reason, "resume_source": "workspace_open"})
     try:
         webbrowser.open(url)
         console.print("[dim]Browser opened to workspace explorer.[/]")
@@ -2073,28 +2364,39 @@ def workspace_open(workspace_id, agent, quiet):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_resume(agent, quiet):
+    """Open your most recent active workspace."""
+    import webbrowser
+
     data = api_get("/v1/workspaces", params={"limit": 10}, require_auth=True)
     workspaces = data.get("workspaces") if isinstance(data, dict) else None
     if not workspaces:
         output({"error": "No workspaces found for this API key."}, agent, quiet)
         return
-    preferred = rank_workspaces(workspaces)[0]
+
+    ranked = rank_workspaces(workspaces)
+    preferred = ranked[0]
     manifest = api_get(f"/v1/workspaces/{preferred['workspace_id']}/manifest", require_auth=True)
-    workspace_data = manifest.get("workspace", preferred) if isinstance(manifest, dict) else preferred
-    workspace_data = dict(workspace_data, reason=describe_resume_reason(preferred))
-    output(workspace_data, agent, quiet)
+    workspace = manifest.get("workspace", preferred) if isinstance(manifest, dict) else preferred
+    reason = describe_resume_reason(preferred)
+    output(workspace, agent, quiet)
     if agent or quiet or not sys.stdout.isatty():
         return
     open_result = open_workspace_in_browser(
         preferred["workspace_id"],
-        resume_reason=workspace_data.get("reason"),
+        resume_reason=reason,
         resume_source="workspace_resume",
     )
-    if open_result is None:
-        console.print("[dim]Browser opened to most recent workspace explorer.[/]")
-    elif str(open_result).startswith("http"):
-        console.print(f"[dim]Open this URL manually:[/] {open_result}")
-    else:
+    if open_result == "Workspace is not ready to open yet.":
+        console.print("[yellow]Most recent workspace is not ready to open yet.[/]")
+        return
+    try:
+        if open_result is None:
+            console.print("[dim]Browser opened to most recent workspace explorer.[/]")
+        elif str(open_result).startswith("http"):
+            console.print(f"[dim]Open this URL manually:[/] {open_result}")
+        else:
+            console.print(f"[yellow]{open_result}[/]")
+    except Exception:
         console.print(f"[yellow]{open_result}[/]")
 
 
@@ -2105,15 +2407,18 @@ def workspace_resume(agent, quiet):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_recommended(address, goal, limit, agent, quiet):
+    """Show the best workspace to resume right now."""
     data = api_get("/v1/workspaces", params={"limit": limit}, require_auth=True)
     workspaces = data.get("workspaces") if isinstance(data, dict) else None
     if not workspaces:
         output({"error": "No workspaces found for this API key."}, agent, quiet)
         return
+
     candidate = choose_resume_candidate(workspaces, seed_address=address, goal_text=goal)
     if not candidate:
         output({"error": "No workspace recommendation available."}, agent, quiet)
         return
+
     enriched = dict(candidate)
     enriched["reason"] = describe_resume_reason(candidate, seed_address=address, goal_text=goal)
     output({"workspaces": [dict(recommended_workspace_payload(enriched), _resume_candidate=True)]}, agent, quiet)
@@ -2127,12 +2432,11 @@ def workspace_recommended(address, goal, limit, agent, quiet):
 @click.option("--budget-credits", type=int, default=None)
 @click.option("--budget-usd", type=float, default=None)
 @click.option("--upto-budget-usd", type=float, default=None)
-@click.option("--surface", "prefer_surface", default="auto", type=click.Choice(["auto", "api", "cli", "mcp", "workspace"]))
-@click.option("--execute-first-step", is_flag=True, help="Execute the first recommended sync step after planning")
 @click.option("--open-workspace", is_flag=True, help="Open the workspace after planning the follow-up ask.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-def workspace_chat(workspace_id, goal, address, chain, budget_credits, budget_usd, upto_budget_usd, prefer_surface, execute_first_step, open_workspace, agent, quiet):
+def workspace_chat(workspace_id, goal, address, chain, budget_credits, budget_usd, upto_budget_usd, open_workspace, agent, quiet):
+    """Continue a workspace with a conversational follow-up ask."""
     if not quiet and not agent:
         console.print("[dim]Continuing workspace conversation...[/]")
     run_ask_flow(
@@ -2143,8 +2447,6 @@ def workspace_chat(workspace_id, goal, address, chain, budget_credits, budget_us
         budget_credits=budget_credits,
         budget_usd=budget_usd,
         upto_budget_usd=upto_budget_usd,
-        prefer_surface=prefer_surface,
-        execute_first_step=execute_first_step,
         open_workspace=open_workspace,
         agent=agent,
         quiet=quiet,
@@ -2156,11 +2458,27 @@ def workspace_chat(workspace_id, goal, address, chain, budget_credits, budget_us
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_next(workspace_id, agent, quiet):
-    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
-    if "error" in manifest:
-        output(manifest, agent, quiet)
+    """Show the investigation brief and recommended next actions for a workspace."""
+    data = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in data:
+        output(data, agent, quiet)
         return
-    output(workspace_brief_payload(manifest, fallback_workspace_id=workspace_id), agent, quiet)
+    brief = (data.get("context") or {}).get("investigation_brief") or {}
+    workspace = data.get("workspace") or {}
+    result = {
+        "workspace_id": workspace.get("workspace_id") or workspace_id,
+        "name": workspace.get("name"),
+        "status": workspace.get("status"),
+        "investigation_brief": {
+            "goal": brief.get("goal") or (data.get("context") or {}).get("seed", {}).get("goal"),
+            "seed_address": (data.get("context") or {}).get("seed", {}).get("address"),
+            "recommended_actions": [
+                action.get("title") or action.get("id")
+                for action in (brief.get("recommended_actions") or [])
+            ],
+        },
+    }
+    output(result, agent, quiet)
 
 
 @workspace.command("brief")
@@ -2168,11 +2486,27 @@ def workspace_next(workspace_id, agent, quiet):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_brief(workspace_id, agent, quiet):
-    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
-    if "error" in manifest:
-        output(manifest, agent, quiet)
+    """Alias for workspace next."""
+    data = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
+    if "error" in data:
+        output(data, agent, quiet)
         return
-    output(workspace_brief_payload(manifest, fallback_workspace_id=workspace_id), agent, quiet)
+    brief = (data.get("context") or {}).get("investigation_brief") or {}
+    workspace = data.get("workspace") or {}
+    result = {
+        "workspace_id": workspace.get("workspace_id") or workspace_id,
+        "name": workspace.get("name"),
+        "status": workspace.get("status"),
+        "investigation_brief": {
+            "goal": brief.get("goal") or (data.get("context") or {}).get("seed", {}).get("goal"),
+            "seed_address": (data.get("context") or {}).get("seed", {}).get("address"),
+            "recommended_actions": [
+                action.get("title") or action.get("id")
+                for action in (brief.get("recommended_actions") or [])
+            ],
+        },
+    }
+    output(result, agent, quiet)
 
 
 @workspace.command("manifest")
@@ -2180,373 +2514,30 @@ def workspace_brief(workspace_id, agent, quiet):
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def workspace_manifest(workspace_id, agent, quiet):
+    """Fetch the full workspace manifest used by the provisioned explorer."""
     output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
 
-
-@workspace.command("conversation")
-@click.argument("workspace_id")
-@click.option("--limit", default=5, type=int, show_default=True, help="How many recent conversation turns to show.")
-@click.option("--agent", is_flag=True)
-@click.option("--quiet", "-q", is_flag=True)
-def workspace_conversation(workspace_id, limit, agent, quiet):
-    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
-    if "error" in manifest:
-        output(manifest, agent, quiet)
-        return
-    output(
-        workspace_conversation_payload(
-            manifest,
-            fallback_workspace_id=workspace_id,
-            limit=limit,
-        ),
-        agent,
-        quiet,
-    )
-
-
-@workspace.command("review")
-@click.argument("workspace_id")
-@click.option("--limit", default=3, type=int, show_default=True, help="How many recent conversation turns to include.")
-@click.option("--open-workspace", is_flag=True, help="Open the workspace explorer after showing the review summary.")
-@click.option("--agent", is_flag=True)
-@click.option("--quiet", "-q", is_flag=True)
-def workspace_review(workspace_id, limit, open_workspace, agent, quiet):
-    manifest = api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True)
-    if "error" in manifest:
-        output(manifest, agent, quiet)
-        return
-    output(
-        workspace_review_payload(
-            manifest,
-            fallback_workspace_id=workspace_id,
-            limit=limit,
-        ),
-        agent,
-        quiet,
-    )
-    if agent or quiet or not open_workspace or not sys.stdout.isatty():
-        return
-    review = workspace_review_payload(
-        manifest,
-        fallback_workspace_id=workspace_id,
-        limit=limit,
-    )
-    goal = ((review.get("investigation_brief") or {}).get("goal")) or "Reviewing active workspace state."
-    open_result = open_workspace_in_browser(
-        workspace_id,
-        resume_reason=f"Reopened from workspace review. {goal}",
-        resume_source="workspace_review",
-    )
-    if open_result is None:
-        console.print("[dim]Browser opened to workspace explorer.[/]")
-    elif str(open_result).startswith("http"):
-        console.print(f"[dim]Open this URL manually:[/] {open_result}")
-    else:
-        console.print(f"[yellow]{open_result}[/]")
-
-
-@cli.command()
-@click.option("--install", is_flag=True)
-@click.option("--agent", is_flag=True)
-@click.option("--category", type=click.Choice(["setup", "intelligence", "analysis", "data", "community"]), help="Filter by category")
-def capabilities(install, agent, category):
-    """List supported CLI capabilities."""
-
-    if install:
-        r = httpx.get(f"{API_BASE}/skills/skill.md", timeout=10)
-        click.echo(r.text)
-        return
-
-    remote = api_get("/v1/capabilities", require_auth=False)
-    if "error" not in remote:
-        if category:
-            remote["capabilities"] = [item for item in remote.get("capabilities", []) if item.get("category") == category]
-        output(remote, agent, False)
-        return
-
-    commands = {
-        "setup": [
-            {"cmd": "init", "desc": "Generate API key", "credits": "Free"},
-            {"cmd": "auth", "desc": "Save existing API key", "credits": "Free"},
-            {"cmd": "buy", "desc": "Purchase credits via Stripe", "credits": "Free"},
-            {"cmd": "pay", "desc": "Configure local x402 payment preferences", "credits": "Free"},
-            {"cmd": "status", "desc": "Check account info and credits", "credits": "Free"},
-        ],
-        "intelligence": [
-            {"cmd": "verdict", "desc": "Address risk verdict (CLEAR/CAUTION/BLOCK)", "credits": "2"},
-            {"cmd": "screen", "desc": "Full counterparty screening with flags", "credits": "2"},
-        ],
-        "analysis": [
-            {"cmd": "analyze", "desc": "AI forensic analysis for wallets and counterparties", "credits": "10"},
-            {"cmd": "query", "desc": "Natural language wallet and stablecoin query", "credits": "10"},
-            {"cmd": "ask", "desc": "Plan an investigation workflow from a goal", "credits": "Free"},
-            {"cmd": "capabilities", "desc": "List supported CLI capabilities", "credits": "Free"},
-        ],
-        "data": [
-            {"cmd": "providers", "desc": "List local enrichment providers", "credits": "Free"},
-            {"cmd": "stablecoins", "desc": "Stablecoin intelligence commands", "credits": "Varies"},
-            {"cmd": "chart", "desc": "Terminal-native chart views", "credits": "Varies"},
-        ],
-        "community": [
-            {"cmd": "report", "desc": "Submit address labels for review", "credits": "Free"},
-            {"cmd": "list-categories", "desc": "List valid reporting categories", "credits": "Free"},
-            {"cmd": "label-search", "desc": "Search labeled addresses", "credits": "2"},
-            {"cmd": "leaderboard", "desc": "View contributor leaderboard", "credits": "1"},
-            {"cmd": "set-name", "desc": "Set your display name", "credits": "Free"},
-        ],
-    }
-
-    if agent or not sys.stdout.isatty():
-        payload = {
-            "commands": [row["cmd"] for rows in commands.values() for row in rows],
-            "categories": list(commands.keys()),
-            "total_commands": sum(len(rows) for rows in commands.values()),
-            "capabilities": commands,
-            "privacy": "Provider keys never leave your machine",
-            "docs": "https://blockintql.com/docs/blockintql",
-            "source": "https://github.com/block6iq/blockintql-cli",
-        }
-        click.echo(json.dumps(payload, indent=2))
-        return
-
-    console.print(BLOCKINTQL_BANNER)
-    credits = fetch_credits()
-    key = get_api_key()
-    if key:
-        status = f"[green]●[/green] authenticated"
-        if credits is not None:
-            status += f" · [bold]{credits:,}[/bold] credits"
-        else:
-            status += " · [dim]credits: unknown[/dim]"
-    else:
-        status = "[red]●[/red] no API key — run: blockintql init"
-    console.print(f"\n[bold]v{__version__}[/bold]  {status}\n")
-
-    categories_to_show = {category: commands[category]} if category else commands
-    for cat_name, rows in categories_to_show.items():
-        console.print(f"\n[bold cyan]{cat_name.upper()}[/bold cyan]")
-        t = Table(show_header=False, box=None, padding=(0, 2))
-        t.add_column(style="yellow", width=18)
-        t.add_column(style="white")
-        t.add_column(style="dim", justify="right", width=8)
-        for row in rows:
-            t.add_row(row["cmd"], row["desc"], row["credits"])
-        console.print(t)
-
-    console.print("\n[dim]Docs: [/dim][cyan]https://blockintql.com/docs/blockintql[/cyan]")
-    console.print("[dim]GitHub: [/dim][cyan]https://github.com/block6iq/blockintql-cli[/cyan]")
-
-
-@cli.command()
-@click.option("--wallet-type", default="cdp", type=click.Choice(["cdp", "privatekey"]))
-@click.option("--cdp-key-id", default=None, envvar="BLOCKINTQL_CDP_KEY_ID")
-@click.option("--cdp-private-key", default=None, envvar="BLOCKINTQL_CDP_PRIVATE_KEY")
-@click.option("--private-key", default=None, envvar="BLOCKINTQL_PRIVATE_KEY")
-@click.option("--auto-pay", is_flag=True)
-@click.option("--max-payment", default=0.10)
-def pay(wallet_type, cdp_key_id, cdp_private_key, private_key, auto_pay, max_payment):
-    config = load_config()
-    payment_config = {"type": wallet_type, "auto_pay": auto_pay, "max_payment_usd": max_payment}
-    if wallet_type == "cdp":
-        payment_config["cdp_key_id"] = cdp_key_id or os.environ.get("BLOCKINTQL_CDP_KEY_ID")
-    elif wallet_type == "privatekey":
-        payment_config["private_key_env"] = "BLOCKINTQL_PRIVATE_KEY"
-    config["payment"] = payment_config
-    save_config(config)
-    console.print(f"[green]Saved local payment preferences ({wallet_type}).[/]")
-    console.print(f"[green]Auto-pay preference: {'enabled' if auto_pay else 'disabled'} | Max: ${max_payment}[/]")
-    console.print("[dim]Sensitive wallet keys are not persisted by this command. Keep them in environment variables.[/]")
-
-
-@cli.command()
-@click.option("--agent", is_flag=True)
-def status(agent):
-    output(api_get("/v1/me"), agent, False)
-
-
-@cli.command()
-@click.option("--email", "-e", default="", help="Optional email for Stripe receipt / fallback delivery")
-@click.option("--pack", default="starter", type=click.Choice(["starter", "pro"]))
-@click.option("--agent", is_flag=True)
-def buy(email, pack, agent):
-    import webbrowser
-
-    if not agent:
-        console.print("[dim]Creating checkout...[/]")
-    existing_key = get_api_key() or ""
-    body = {"pack": pack, "api_key": existing_key}
-    if email:
-        body["email"] = email
-    result = api_post("/v1/billing/checkout", body, require_auth=False)
-    if "error" in result and not result.get("free_tier_exhausted"):
-        err_console.print(f"  [red]✗[/red] {result['error']}")
-        return
-    checkout_url = result.get("checkout_url")
-    if not checkout_url:
-        err_console.print("[red]Could not create checkout session[/]")
-        return
-    if agent or not sys.stdout.isatty():
-        click.echo(json.dumps({"checkout_url": checkout_url, "pack": pack, "email": email or None}, indent=2))
-        return
-    console.print(f"  [dim]Pack:[/dim]  {'$10 — 1,000 screens' if pack == 'starter' else '$40 — 5,000 screens'}")
-    console.print(f"  [dim]Email:[/dim] {email or 'Not provided'}")
-    console.print(f"  [dim]URL:[/dim]   {checkout_url}")
-    console.print()
-    try:
-        webbrowser.open(checkout_url)
-        console.print("[dim]Browser opened. Complete payment to add credits.[/]")
-    except Exception:
-        console.print("[dim]Copy the URL above to complete payment.[/]")
-    console.print("[dim]Credits will be added to your existing key automatically.[/]")
-
-
-
-@cli.command()
-@click.option("--agent", is_flag=True)
-def init(agent):
-    """
-    Generate a free API key instantly — no email, no payment required.
-    10 free screens per day. Buy credits to remove the limit.
-
-    \b
-    Examples:
-      blockintql init
-      blockintql init --agent | jq -r '.api_key'
-    """
-    result = api_post("/v1/keys/generate", {}, require_auth=False)
-
-    if "error" in result:
-        err_console.print(f"  [red]✗[/red] {result['error']}")
-        return
-
-    key = result.get("api_key", "")
-
-    if agent or not sys.stdout.isatty():
-        click.echo(json.dumps(result, indent=2))
-        return
-
-    # Auto-save key
-    config = load_config()
-    config["api_key"] = key
-    save_config(config)
-
-    console.print()
-    console.print(f"  [bold green]API key generated and saved[/bold green]")
-    console.print(f"  [dim]{'─' * 50}[/dim]")
-    console.print(f"  [dim]key    [/dim] {key}")
-    console.print(f"  [dim]tier   [/dim] pay-as-you-go")
-    console.print(f"  [dim]credits[/dim] 0 — buy credits to start")
-    console.print(f"  [dim]{'─' * 50}[/dim]")
-    console.print(f"  [dim]Need more?[/dim]")
-    console.print("  blockintql buy")
-    console.print(f"  blockintql pay --auto-pay [dim](agents — USDC on Base)[/dim]")
-    console.print()
-
-
-
-@cli.command()
-@click.option("--address", "-a", default="")
-@click.option("--bulk", type=click.Path(exists=True), default=None)
-@click.option("--entity", "-e", required=True)
-@click.option("--category", "-c", default="OTHER")
-@click.option("--source-url", default="")
-@click.option("--evidence", default="")
-@click.option("--agent", is_flag=True)
-def report(address, bulk, entity, category, source_url, evidence, agent):
-    """Report address(es) for community review."""
-    addresses = []
-    if bulk:
-        with open(bulk) as f:
-            addresses = [l.strip() for l in f if l.strip()]
-    elif address:
-        addresses = [address]
-    else:
-        err_console.print("[red]Provide --address or --bulk[/red]"); return
-    body = {"addresses": addresses, "entity": entity,
-            "category": category.upper(), "source_url": source_url, "evidence": evidence}
-    result = api_post("/v1/labels/report", body)
-    if agent:
-        click.echo(json.dumps(result, indent=2)); return
-    if "error" in result:
-        err_console.print(f"  [red]{result['error']}[/red]"); return
-    cnt = result.get("count", 0)
-    console.print(f"  [green]Submitted {cnt} address(es)[/green]")
-    console.print(f"  [dim]entity:[/dim] {entity}")
-    console.print(f"  [dim]category:[/dim] {category}")
-    console.print(f"  [dim]Credits awarded upon approval[/dim]")
-
-
-@cli.command("list-categories")
-@click.option("--agent", is_flag=True)
-def list_categories(agent):
-    """List valid categories for reporting."""
-    result = api_get("/v1/labels/categories", require_auth=False)
-    if agent:
-        click.echo(json.dumps(result, indent=2)); return
-    for cat in result.get("categories", []):
-        console.print(f"  {cat}")
-
-
-@cli.command("label-add", hidden=True)
-@click.option("--address", "-a", required=True)
-@click.option("--entity", "-e", required=True)
-@click.option("--category", "-c", default="OTHER")
-@click.option("--risk", default="MEDIUM")
-@click.option("--sanctioned", is_flag=True)
-@click.option("--agent", is_flag=True)
-def label_add(address, entity, category, risk, sanctioned, agent):
-    """Admin: add or update an address label."""
-    body = {"address": address, "entity": entity,
-            "category": category.upper(), "risk_level": risk.upper(),
-            "is_sanctioned": sanctioned}
-    result = api_post("/v1/labels/add", body)
-    if agent:
-        click.echo(json.dumps(result, indent=2)); return
-    if "error" in result:
-        err_console.print(f"  [red]{result['error']}[/red]"); return
-    console.print(f"  [green]Label added[/green]: {entity} ({category})")
-
-
-@cli.command("label-search")
-@click.option("--entity", "-e", default="")
-@click.option("--category", "-c", default="")
-@click.option("--address", "-a", default="")
-@click.option("--agent", is_flag=True)
-def label_search(entity, category, address, agent):
-    """Search address labels."""
-    params = {}
-    if entity: params["entity"] = entity
-    if category: params["category"] = category
-    if address: params["address"] = address
-    if not params:
-        err_console.print("[red]Provide --entity, --category, or --address[/red]"); return
-    result = api_get("/v1/labels/search", params=params)
-    output(result, agent, False)
-
-
-@cli.command("leaderboard")
-@click.option("--agent", is_flag=True)
-def leaderboard(agent):
-    """View community attribution leaderboard."""
-    result = api_get("/v1/labels/leaderboard")
-    if agent:
-        click.echo(json.dumps(result, indent=2)); return
-    for r in result.get("leaderboard", []):
-        console.print(f"  #{r['rank']} {r.get('approved',0)} approved {r.get('credits_earned',0)} credits")
-
-
-@cli.command("set-name")
-@click.argument("name")
-def set_name(name):
-    """Set your display name for the leaderboard."""
-    result = api_post("/v1/me/name", {"display_name": name})
-    if "error" in result:
-        err_console.print(f"  [red]{result['error']}[/red]"); return
-    console.print(f"  [green]Display name set:[/green] {name}")
 
 def main():
     cli()
 
-
 if __name__ == "__main__":
     main()
+
+
+@cli.command()
+@click.argument("name")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def ens(name, agent, quiet):
+    """Resolve an ENS name to an Ethereum address.
+
+    \b
+    Examples:
+      blockintql ens vitalik.eth
+      blockintql ens blockint.eth
+    """
+    if not quiet and not agent:
+        console.print(f"[dim]Resolving {name}...[/]")
+    result = api_get(f"/v1/eth/ens/{name}")
+    output(result, agent, quiet)

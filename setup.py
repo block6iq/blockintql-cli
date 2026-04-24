@@ -22,14 +22,17 @@ setup(
     install_requires=[
         "click>=8.0.0",
         "httpx>=0.27.0",
+        "requests>=2.32.0",
         "rich>=13.0.0",
+        "x402[httpx]>=2.7.0; python_version>='3.10'",
+        "eth_account>=0.13.0; python_version>='3.10'",
     ],
     entry_points={
         "console_scripts": [
             "blockintql=blockintql.cli:main",
         ],
     },
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",

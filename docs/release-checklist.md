@@ -43,7 +43,7 @@ python3 setup.py sdist bdist_wheel
 3. Verify install:
 
 ```bash
-python3 -m pip install --upgrade blockintql==1.5.0
+python3 -m pip install --upgrade blockintql==1.2.0
 blockintql --help
 ```
 
