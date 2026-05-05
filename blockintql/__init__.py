@@ -1,3 +1,3 @@
 """BlockINTQL — Sovereign Blockchain Intelligence CLI."""
 
-__version__ = "1.5.2"
+__version__ = "1.5.4"

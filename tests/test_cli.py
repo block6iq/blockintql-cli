@@ -206,6 +206,10 @@ class BlockINTQLCliTests(unittest.TestCase):
             "generic",
             "",
             url_template="https://example.com/screen/{address}",
+            risk_field="risk_score",
+            entity_field="entity",
+            auth_header="Authorization",
+            auth_prefix="Bearer",
         )
         payload = json.loads(result.output)
         self.assertEqual(payload["provider_data"]["provider"], "generic")
@@ -274,6 +278,10 @@ class BlockINTQLCliTests(unittest.TestCase):
             "chainalysis",
             "provider-secret",
             url_template=None,
+            risk_field="risk_score",
+            entity_field="entity",
+            auth_header="Authorization",
+            auth_prefix="Bearer",
         )
         payload = json.loads(result.output)
         self.assertNotIn("provider-secret", result.output)
@@ -283,6 +291,10 @@ class BlockINTQLCliTests(unittest.TestCase):
         self.assertEqual(payload["provider_data"]["entity_name"], "Vendor Entity")
         self.assertEqual(payload["provider_data"]["canonical_category"], "exchange")
         self.assertEqual(payload["provider_data"]["recommended_verdict"], "CLEAR")
+        self.assertIn("consensus", payload)
+        self.assertEqual(payload["consensus"]["mode"], "address_screening")
+        self.assertEqual(payload["consensus"]["decision"], "CLEAR")
+        self.assertEqual(payload["consensus"]["vote_split"]["clear"], 3)
 
     @patch("blockintql.cli.api_post")
     @patch("blockintql.cli.get_provider")
@@ -339,6 +351,10 @@ class BlockINTQLCliTests(unittest.TestCase):
             "generic",
             "",
             url_template="https://vendor.example/screen/{address}",
+            risk_field="risk_score",
+            entity_field="entity",
+            auth_header="Authorization",
+            auth_prefix="Bearer",
         )
         payload = json.loads(result.output)
         self.assertEqual(payload["verdict"], "BLOCK")
@@ -348,6 +364,10 @@ class BlockINTQLCliTests(unittest.TestCase):
         self.assertEqual(payload["provider_data"]["provider"], "generic")
         self.assertEqual(payload["provider_data"]["canonical_category"], "sanctions")
         self.assertEqual(payload["provider_data"]["recommended_verdict"], "BLOCK")
+        self.assertIn("consensus", payload)
+        self.assertEqual(payload["consensus"]["mode"], "address_screening")
+        self.assertEqual(payload["consensus"]["decision"], "BLOCK")
+        self.assertEqual(payload["consensus"]["vote_split"]["block"], 3)
 
     @patch("blockintql.cli.api_post")
     @patch("blockintql.cli.get_provider")
@@ -448,7 +468,7 @@ class BlockINTQLCliTests(unittest.TestCase):
         )
 
     @patch("blockintql.cli.api_post")
-    def test_metamask_provider_does_not_require_key(self, mock_api_post):
+    def test_generic_provider_does_not_require_key(self, mock_api_post):
         mock_api_post.return_value = {
             "verdict": "CLEAR",
             "safe": True,
@@ -482,7 +502,7 @@ class BlockINTQLCliTests(unittest.TestCase):
                     "--chain",
                     "ethereum",
                     "--provider",
-                    "metamask",
+                    "generic",
                     "--agent",
                 ],
             )
@@ -514,6 +534,31 @@ class BlockINTQLCliTests(unittest.TestCase):
         mock_api_get.assert_called_once_with(
             "/v1/eth/address/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045/history",
             {"limit": 25},
+            timeout=120,
+        )
+
+    @patch("blockintql.cli.api_post")
+    def test_screen_accepts_positional_address(self, mock_api_post):
+        mock_api_post.return_value = {
+            "verdict": "CLEAR",
+            "safe": True,
+            "risk_score": 0,
+            "risk_indicators": [],
+            "entity": None,
+            "action": "ok",
+            "chain": "ethereum",
+        }
+        result = self.runner.invoke(
+            cli,
+            ["screen", "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", "--agent"],
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_api_post.assert_called_once_with(
+            "/v1/screen",
+            {
+                "address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                "chain": "ethereum",
+            },
         )
 
     @patch("blockintql.cli.api_get")
@@ -527,6 +572,7 @@ class BlockINTQLCliTests(unittest.TestCase):
         mock_api_get.assert_called_once_with(
             "/v1/eth/address/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045/history",
             {"limit": 25},
+            timeout=120,
         )
 
     @patch("blockintql.cli.api_get")
@@ -659,6 +705,7 @@ class BlockINTQLCliTests(unittest.TestCase):
         mock_api_get.assert_called_once_with(
             "/v1/eth/address/0xabc/stablecoin-history",
             {"days": 7, "interval": "day"},
+            timeout=180,
         )
 
     @patch("blockintql.cli.api_get")
@@ -1054,14 +1101,12 @@ class BlockINTQLCliTests(unittest.TestCase):
         with patch("blockintql.cli.console", test_console), patch("blockintql.cli.sys.stdout.isatty", return_value=True):
             output(payload, agent=False, quiet=False)
         rendered = buffer.getvalue()
-        self.assertIn("continue with selected mode", rendered)
-        self.assertIn("blockintql verdict 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", rendered)
-        self.assertIn("--chain", rendered)
-        self.assertIn("ethereum", rendered)
+        self.assertIn("how to continue", rendered)
+        self.assertIn("blockintql verdict --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", rendered)
         self.assertIn("blockintql stablecoins flows --hours 24", rendered)
-        self.assertIn("Then in the workspace:", rendered)
-        self.assertIn("Run Expansion", rendered)
-        self.assertIn("Hydrate Graph", rendered)
+        self.assertIn("If the workspace opens", rendered)
+        self.assertIn("Run the suggested expansion", rendered)
+        self.assertIn("Hydrate the graph to load the evidence surface", rendered)
 
     @patch("blockintql.cli.api_post")
     def test_ask_open_workspace_keeps_server_executed_workspace(self, mock_api_post):
