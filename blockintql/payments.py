@@ -99,11 +99,6 @@ def build_payment_details(config: PaymentConfig, challenge: Optional[Dict[str, A
 def ensure_wallet_runtime_ready(config: PaymentConfig, environ: Optional[Mapping[str, str]] = None) -> None:
     env = environ or os.environ
     if config.wallet_type == "cdp":
-        if not (config.cdp_key_id or env.get("BLOCKINTQL_CDP_KEY_ID")):
-            raise PaymentConfigurationError(
-                "CDP wallet is not fully configured.",
-                details=build_payment_details(config),
-            )
         if not (env.get("BLOCKINTQL_CDP_PRIVATE_KEY") or env.get("BLOCKINTQL_PRIVATE_KEY") or env.get("EVM_PRIVATE_KEY")):
             raise PaymentConfigurationError(
                 "CDP wallet private key is not available in the environment.",

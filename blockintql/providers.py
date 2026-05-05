@@ -14,6 +14,38 @@ def _text_set(values: Iterable) -> set[str]:
     return items
 
 
+def _nested_get(data, path, default=None):
+    value = data
+    for part in str(path or "").split("."):
+        if not part:
+            continue
+        if isinstance(value, dict):
+            value = value.get(part, default)
+        elif isinstance(value, (list, tuple)):
+            try:
+                value = value[int(part)]
+            except (TypeError, ValueError, IndexError):
+                return default
+        else:
+            return default
+    return value
+
+
+def _collect_text_tokens(value) -> list[str]:
+    tokens = []
+    if isinstance(value, dict):
+        for nested in value.values():
+            tokens.extend(_collect_text_tokens(nested))
+    elif isinstance(value, (list, tuple, set)):
+        for nested in value:
+            tokens.extend(_collect_text_tokens(nested))
+    elif value is not None:
+        text = str(value).strip()
+        if text:
+            tokens.append(text)
+    return tokens
+
+
 CANONICAL_PROVIDER_RULES = [
     {
         "category": "sanctions",
@@ -148,7 +180,8 @@ class AttributionProvider(ABC):
         pass
     def normalize(self, raw: dict) -> dict:
         return {"entity_name": None, "entity_category": None, "risk_score": 0,
-                "risk_indicators": [], "sanctions_hit": False, "provider": self.name, "raw": raw}
+                "risk_indicators": [], "sanctions_hit": False, "provider": self.name, "raw": raw,
+                "vendor_verdict": None, "vendor_category": None}
 
     @property
     def requires_api_key(self) -> bool:
@@ -229,55 +262,6 @@ class EllipticProvider(AttributionProvider):
             return self.normalize({"error": str(e)})
 
 
-class ArkhamProvider(AttributionProvider):
-    name = "arkham"
-    description = "Arkham Intelligence — entity intelligence platform"
-    def get_address_risk(self, address: str, chain: str = "bitcoin") -> dict:
-        try:
-            r = httpx.get(f"https://api.arkhamintelligence.com/intelligence/address/{address}",
-                headers={"API-Key": self.api_key}, timeout=15)
-            if r.status_code != 200:
-                return self.normalize({"error": f"HTTP {r.status_code}"})
-            data = r.json()
-            entity = data.get("arkhamEntity", {})
-            entity_type = entity.get("type", "")
-            risk_map = {"exchange": 10, "defi": 15, "mixer": 90, "sanctions": 100, "scam": 95, "hack": 95, "darknet": 90}
-            result = self.normalize(data)
-            result.update({"entity_name": entity.get("name"), "entity_category": entity_type,
-                "risk_score": risk_map.get(entity_type.lower(), 20),
-                "sanctions_hit": entity_type.lower() == "sanctions"})
-            return result
-        except Exception as e:
-            return self.normalize({"error": str(e)})
-
-
-class MetaMaskRiskProvider(AttributionProvider):
-    name = "metamask"
-    description = "MetaMask Transaction Insight — free, no API key needed"
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-
-    @property
-    def requires_api_key(self) -> bool:
-        return False
-
-    def get_address_risk(self, address: str, chain: str = "ethereum") -> dict:
-        if chain != "ethereum":
-            return self.normalize({"error": "MetaMask only supports Ethereum"})
-        try:
-            r = httpx.get(f"https://risk-api.metamask.io/v1/chains/1/addresses/{address}", timeout=10)
-            if r.status_code != 200:
-                return self.normalize({"error": f"HTTP {r.status_code}"})
-            data = r.json()
-            risk_score = 90 if data.get("result") == "Malicious" else 50 if data.get("result") == "Warning" else 0
-            indicators = ["FLAGGED_MALICIOUS"] if risk_score == 90 else ["WARNING"] if risk_score == 50 else []
-            result = self.normalize(data)
-            result.update({"risk_score": risk_score, "risk_indicators": indicators})
-            return result
-        except Exception as e:
-            return self.normalize({"error": str(e)})
-
-
 class GenericProvider(AttributionProvider):
     """
     Generic provider — point to any REST API that returns risk data.
@@ -321,26 +305,128 @@ class GenericProvider(AttributionProvider):
             data = r.json()
             # Try to extract risk score from nested path e.g. "result.risk.score"
             risk_score = 0
-            parts = self.risk_field.split(".")
-            val = data
-            for p in parts:
-                val = val.get(p, 0) if isinstance(val, dict) else 0
+            val = _nested_get(data, self.risk_field, 0)
             try:
                 risk_score = float(val)
                 if risk_score <= 1:
                     risk_score *= 100
-            except:
+            except Exception:
                 pass
-            # Extract entity name
-            entity_val = data
-            for p in self.entity_field.split("."):
-                entity_val = entity_val.get(p) if isinstance(entity_val, dict) else None
+            if risk_score == 0:
+                alt_risk = (
+                    _nested_get(data, "riskScore")
+                    or _nested_get(data, "risk_score")
+                    or _nested_get(data, "score")
+                )
+                try:
+                    risk_score = float(alt_risk or 0)
+                    if risk_score <= 1:
+                        risk_score *= 100
+                except Exception:
+                    pass
+
+            # Extract entity value and common category fields
+            entity_val = _nested_get(data, self.entity_field)
+            entity_category = (
+                _nested_get(data, "entity_category")
+                or _nested_get(data, "entityCategory")
+                or _nested_get(data, "category")
+                or _nested_get(data, "type")
+                or _nested_get(data, "classification")
+                or _nested_get(data, "entity.type")
+            )
+
+            # Collect common risk / labeling signals from custom provider payloads.
+            common_signal_fields = [
+                "risk_indicators",
+                "labels",
+                "tags",
+                "signals",
+                "findings",
+                "reasons",
+                "reason",
+                "category",
+                "status",
+                "verdict",
+                "disposition",
+                "classification",
+                "entity_category",
+                "entityCategory",
+                "label",
+                "crimeTypes",
+                "reports",
+                "riskLevel",
+                "title",
+            ]
+            signal_tokens = []
+            for field in common_signal_fields:
+                signal_tokens.extend(_collect_text_tokens(_nested_get(data, field)))
+            if entity_val:
+                signal_tokens.append(str(entity_val))
+            if entity_category:
+                signal_tokens.append(str(entity_category))
+            normalized_signals = sorted(_text_set(signal_tokens))
+
+            haystack = " ".join(normalized_signals)
+            sanctions_hit = any(token in haystack for token in ("sanction", "ofac", "sdn", "blocked"))
+
+            vendor_verdict = (
+                _nested_get(data, "verdict")
+                or _nested_get(data, "riskLevel")
+                or _nested_get(data, "status")
+                or _nested_get(data, "disposition")
+                or _nested_get(data, "result")
+            )
+            vendor_category = (
+                entity_category
+                or _nested_get(data, "label")
+                or _nested_get(data, "classification")
+                or _nested_get(data, "crimeTypes.0")
+                or _nested_get(data, "reports.0.crimeType")
+            )
+
+            # Infer a conservative score when the custom provider gives a label/verdict but not a score.
+            if risk_score == 0:
+                if any(token in haystack for token in ("exploit", "hack", "drainer", "phishing", "scam", "fraud", "ransomware", "malicious")):
+                    risk_score = 95
+                elif any(token in haystack for token in ("sanction", "ofac", "sdn", "blocked")):
+                    risk_score = 100
+                elif any(token in haystack for token in ("warning", "suspicious", "review", "caution", "high_risk", "high risk")):
+                    risk_score = 65
+
             result = self.normalize(data)
-            result.update({"entity_name": str(entity_val) if entity_val else None,
-                "risk_score": risk_score})
+            result.update({
+                "entity_name": str(entity_val) if entity_val else None,
+                "entity_category": str(entity_category) if entity_category else None,
+                "risk_score": risk_score,
+                "risk_indicators": normalized_signals,
+                "sanctions_hit": sanctions_hit,
+                "vendor_verdict": str(vendor_verdict) if vendor_verdict else None,
+                "vendor_category": str(vendor_category) if vendor_category else None,
+            })
             return result
         except Exception as e:
             return self.normalize({"error": str(e)})
+
+
+class MetaSleuthProvider(GenericProvider):
+    name = "metasleuth"
+    description = "MetaSleuth — visual fund tracing and entity intelligence"
+
+
+class CrystalProvider(GenericProvider):
+    name = "crystal"
+    description = "Crystal — blockchain intelligence and compliance analytics"
+
+
+class MerkleScienceProvider(GenericProvider):
+    name = "merkle_science"
+    description = "Merkle Science — transaction monitoring and blockchain forensics"
+
+
+class NomisProvider(GenericProvider):
+    name = "nomis"
+    description = "Nomis — wallet reputation and onchain scoring"
 
 
 # Add generic to registry
@@ -348,8 +434,10 @@ PROVIDERS = {
     "chainalysis": ChainalysisProvider,
     "trm": TRMProvider,
     "elliptic": EllipticProvider,
-    "arkham": ArkhamProvider,
-    "metamask": MetaMaskRiskProvider,
+    "metasleuth": MetaSleuthProvider,
+    "crystal": CrystalProvider,
+    "merkle_science": MerkleScienceProvider,
+    "nomis": NomisProvider,
     "generic": GenericProvider,
 }
 
@@ -360,7 +448,14 @@ def get_provider(name: str, api_key: str = "", **kwargs):
 
 
 def list_providers() -> list:
-    return [{"name": k, "description": v.description} for k, v in PROVIDERS.items()]
+    items = [{"name": k, "description": v.description} for k, v in PROVIDERS.items()]
+    return [
+        {
+            "name": "blockintai",
+            "description": "BlockINTAI — local custom screening route with first-class CLI defaults",
+        },
+        *items,
+    ]
 
 # ── PRIVACY GUARANTEE ─────────────────────────────────────────────────────────
 #

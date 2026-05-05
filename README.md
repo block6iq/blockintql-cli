@@ -77,6 +77,14 @@ blockintql status
 
 For keyless pay-per-request access, configure wallet-backed payments locally instead of setting an API key.
 
+If an x402-paid request degrades, BlockINTQL can return a compensation token that can be claimed as API credits:
+
+```bash
+blockintql compensation claim --token x402cmp_tok_...
+```
+
+If no API key is configured, the CLI now attempts a wallet-signed claim payload automatically (`wallet_claim`) so backend services can redeem compensation using wallet identity instead of API key identity.
+
 ## Usage
 
 ```bash
@@ -89,7 +97,8 @@ blockintql screen --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --chain e
 # Enrich with a local provider call
 blockintql screen --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 \
   --chain ethereum \
-  --provider metamask
+  --provider metasleuth \
+  --provider-url "https://your-route/{address}"
 
 # Generic provider
 blockintql verdict --address 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa \
@@ -98,6 +107,12 @@ blockintql verdict --address 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa \
 
 # Natural language intelligence
 blockintql query "is this address linked to Lazarus Group?"
+
+# Fast wallet triage
+blockintql stats 0xC94eBB328aC25b95DB0E0AA968371885Fa516215
+
+# Recent investigative history
+blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 7
 
 # Plan an investigation and open a recommended workspace
 blockintql ask "Open a deeper stablecoin investigation workspace for this wallet" \
@@ -199,11 +214,14 @@ Provider adjudication model:
 
 Available providers:
 
+- `blockintai`
 - `chainalysis`
 - `trm`
 - `elliptic`
-- `arkham`
-- `metamask`
+- `metasleuth`
+- `crystal`
+- `merkle_science`
+- `nomis`
 - `generic`
 
 Examples:
@@ -212,11 +230,35 @@ Examples:
 export BLOCKINTQL_PROVIDER_KEY=...
 blockintql screen --address 0x123... --chain ethereum --provider chainalysis
 
-blockintql screen --address 0x123... --chain ethereum --provider metamask
+blockintql screen --address 0x123... --chain ethereum --provider metasleuth --provider-url "https://your-route/{address}"
 
 blockintql screen --address 1ABC... \
   --provider generic \
   --provider-url "https://your-api.com/screen/{address}"
+```
+
+## Ethereum Investigation Surfaces
+
+BlockINTQL is Ethereum and stablecoin-first at launch.
+
+- `blockintql history <address>` returns a recent investigative slice instead of pretending the CLI should dump an unlimited raw ledger.
+- High-throughput service wallets can return a condensed triage surface with:
+  - wallet classification
+  - entity badge when known
+  - stablecoin movement summary
+  - lead counterparty
+- `blockintql stats <address>` is the fastest first look for active wallets.
+- For hot wallets, the strongest next path is usually:
+  - `blockintql stats <address>`
+  - `blockintql stablecoins history <address> --days 30`
+  - `blockintql stablecoins counterparties <address>`
+
+Example:
+
+```bash
+blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215
+blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 1
+blockintql stats 0xC94eBB328aC25b95DB0E0AA968371885Fa516215
 ```
 
 ## Payment Preferences
@@ -256,4 +298,23 @@ For Model Context Protocol clients:
 
 ```text
 https://blockintql-mcp-385334043904.us-central1.run.app/mcp
+```
+
+The live MCP surface is investigation-first, not a generic raw data wrapper.
+
+Primary tools:
+
+- `investigate_wallet`
+  - returns screening, wallet stats, stablecoin balances, history mode, token lanes, and lead counterparties in one object
+- `service_wallet_triage`
+  - optimized for exchange, casino, bridge, and other high-throughput wallets
+- `explain_decision`
+  - explains why a wallet was marked `CLEAR`, `CAUTION`, or `BLOCK`
+
+This works especially well for conversational prompts such as:
+
+```text
+Investigate this wallet and summarize the stablecoin risk.
+Why did BlockINTQL say block?
+Show me a triage view for this hot wallet.
 ```

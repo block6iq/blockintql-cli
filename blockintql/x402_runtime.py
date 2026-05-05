@@ -82,6 +82,7 @@ def request_with_x402(
                 "status_code": response.status_code,
                 "payload": payload,
                 "receipt": receipt,
+                "headers": dict(response.headers),
             }
 
     try:
