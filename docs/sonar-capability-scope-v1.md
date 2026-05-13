@@ -20,15 +20,10 @@ This document defines which Sonar-style capabilities are active in the public CL
 - Sanctions hard-rule:
   - sanctions evidence resolves to `BLOCK` and `100/100`
 
-## Not in Public CLI V1
+## Optional Workflow Extensions
 
-- Auto-write SAR workflows
-- Auto-file SAR workflows
-- Officer/analyst queue workflow state machines
-- Internal alert review lifecycle orchestration
-- Internal organization-specific briefing/task automation
-
-These surfaces remain out of scope for public CLI launch and are intentionally not required for deterministic address screening compatibility.
+The public CLI focuses on deterministic screening contracts and auditable consensus output.
+Additional workflow layers (for example, filing automation or case-management orchestration) are implementation choices for downstream deployments and are not required for schema compatibility.
 
 ## Compatibility Note
 

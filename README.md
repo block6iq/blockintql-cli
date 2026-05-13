@@ -257,26 +257,21 @@ blockintql screen --address 1ABC... \
 
 ## Ethereum Investigation Surfaces
 
-BlockINTQL is Ethereum and stablecoin-first at launch.
+BlockINTQL is Ethereum-first for V1 launch screening workflows.
 
 - `blockintql history <address>` returns a recent investigative slice instead of pretending the CLI should dump an unlimited raw ledger.
 - High-throughput service wallets can return a condensed triage surface with:
   - wallet classification
   - entity badge when known
-  - stablecoin movement summary
+  - movement summary
   - lead counterparty
-- `blockintql stats <address>` is the fastest first look for active wallets.
-- For hot wallets, the strongest next path is usually:
-  - `blockintql stats <address>`
-  - `blockintql stablecoins history <address> --days 30`
-  - `blockintql stablecoins counterparties <address>`
+- Preview analytics (stablecoins/stats/tx/workspace) remain available behind `BLOCKINTQL_ENABLE_EXPERIMENTAL=1`.
 
 Example:
 
 ```bash
 blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215
 blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 1
-blockintql stats 0xC94eBB328aC25b95DB0E0AA968371885Fa516215
 ```
 
 ## Payment Preferences
