@@ -1056,6 +1056,23 @@ def enrich_with_provider(result, address, chain, provider_name, provider_key, pr
             "reasons": provider_policy.get("reasons", []),
             "vendor_to_canonical": provider_mapping,
         }
+        # Launch policy: exploit/scam/ransomware/sanctions evidence must resolve to BLOCK.
+        hard_block_categories = {"sanctions", "scam", "ransomware", "darknet", "mixer"}
+        if (
+            provider_recommended_verdict == "BLOCK"
+            and str(canonical_category or "").lower() in hard_block_categories
+        ):
+            existing_consensus["decision"] = "BLOCK"
+            existing_consensus["confidence"] = "high"
+            reasons = list(existing_consensus.get("reasons") or [])
+            reasons.append("Exploit/sanctions policy override applied from provider adjudication.")
+            existing_consensus["reasons"] = reasons
+            policy_mapping = dict(existing_consensus.get("policy_mapping") or {})
+            block_basis = list(policy_mapping.get("block_basis") or [])
+            if "provider_exploit_policy_override" not in block_basis:
+                block_basis.append("provider_exploit_policy_override")
+            policy_mapping["block_basis"] = block_basis
+            existing_consensus["policy_mapping"] = policy_mapping
         result["consensus"] = existing_consensus
     else:
         result["consensus"] = {
