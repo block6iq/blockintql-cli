@@ -14,6 +14,9 @@ This document defines which Sonar-style capabilities are active in the public CL
   - `reasons`
   - `policy_mapping`
   - `evidence_window`
+  - `monitoring_evidence.source_of_funds`
+  - `monitoring_evidence.pattern_signals`
+  - `monitoring_evidence.terminal_service_nodes`
 - Sanctions hard-rule:
   - sanctions evidence resolves to `BLOCK` and `100/100`
 
