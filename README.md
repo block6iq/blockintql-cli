@@ -134,20 +134,19 @@ Live Now (V1):
 - `login`, `pay`, `provider`, `providers`, `screen`, `status`
 - `verdict`, `wallet`
 
-Likely V1.1 (now live-network feasible):
-
-- `create image`
-- `tx`
-- `stablecoins balances`
-- `stablecoins history`
-- `stablecoins counterparties`
-- `workspace`
-
 Preview commands remain available behind:
 
 ```bash
 export BLOCKINTQL_ENABLE_EXPERIMENTAL=1
 ```
+
+Preview command surfaces currently include:
+
+- `create`
+- `stablecoins`
+- `tx`
+- `workspace`
+- additional preview command groups shown in `blockintql --help`
 
 ## Image Output UX
 

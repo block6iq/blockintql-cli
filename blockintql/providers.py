@@ -457,6 +457,12 @@ def list_providers() -> list:
         *items,
     ]
 
+
+def get_provider_spec(name: str):
+    if not name:
+        return None
+    return PROVIDER_SPECS.get(str(name).strip().lower())
+
 # ── PRIVACY GUARANTEE ─────────────────────────────────────────────────────────
 #
 # Provider API calls are made DIRECTLY from this CLI on the user's machine.
