@@ -18,7 +18,7 @@ CLEAR means no adverse indicators were found in Block6IQ's database at the time 
 
 Block6IQ is a software and data provider, not a registered compliance service, licensed money services business, or substitute for a qualified compliance officer. Use of this tool does not satisfy any obligation to conduct sanctions screening, AML due diligence, KYC verification, or any other regulated compliance function.
 
-This tool is not intended for use by individuals or entities subject to comprehensive OFAC sanctions programs, or for use in any activity prohibited by applicable law. You are responsible for ensuring your use complies with all laws in your jurisdiction.
+This tool must not be used to facilitate any activity prohibited by applicable law, including sanctions evasion, money laundering, or terrorist financing. You are responsible for ensuring your use complies with all laws and regulations in your jurisdiction.
 
 ### 4. Autonomous AI Agents
 
