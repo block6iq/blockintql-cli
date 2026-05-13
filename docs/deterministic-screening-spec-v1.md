@@ -127,6 +127,20 @@ Implementations claiming compatibility should expose:
 - `unknown_depletion` (sum of outbound not matched to prior inbound lots)
 - `total_inbound`
 - `total_outbound`
+- `terminal_service_nodes` (top terminal labeled service counterparties where traversal stops)
+- `terminal_service_node_count`
+
+### Traversal guardrail for source-of-funds context
+
+When collecting multi-hop counterparty context, implementations should treat known service categories as terminal expansion nodes. Typical terminal categories include:
+
+- `exchange`
+- `bridge`
+- `defi`
+- `custodian`
+- `service`
+
+This keeps reverse source-of-funds context from recursively traversing through high-throughput service wallets while still preserving those entities in the evidence surface.
 
 ### Deterministic behavior guarantees
 
