@@ -1040,69 +1040,50 @@ def enrich_with_provider(result, address, chain, provider_name, provider_key, pr
             f"{sanction_reason} Final decision: BLOCK (100/100)."
         )
 
-    vote_block = "BLOCK" if provider_recommended_verdict == "BLOCK" else "CLEAR"
-    vote_review = "REVIEW" if provider_recommended_verdict in {"CAUTION", "UNKNOWN"} else "CLEAR"
-    vote_clear = "CLEAR" if provider_recommended_verdict == "CLEAR" else "BLOCK" if provider_recommended_verdict == "BLOCK" else "REVIEW"
-
-    result["consensus"] = {
-        "enabled": True,
-        "mode": "address_screening",
-        "model": "sonar_consensus_v1",
-        "consensus_reached": True,
-        "decision": provider_recommended_verdict or result.get("verdict"),
-        "confidence": provider_policy.get("confidence") or "low",
-        "vote_split": {
-            "block": 3 if provider_recommended_verdict == "BLOCK" else 0,
-            "review": 3 if provider_recommended_verdict in {"CAUTION", "UNKNOWN"} else 0,
-            "clear": 3 if provider_recommended_verdict == "CLEAR" else 0,
-        },
-        "votes": [
-            {
-                "agent": "Sentinel",
-                "codename": "sentinel",
-                "role": "sanctions_and_label_intelligence",
-                "vote": vote_block,
-                "reason": "Sanctions and label intelligence voter assessment.",
+    # Preserve server-side Sonar consensus when present.
+    # If unavailable, expose a clearly marked local adjudication consensus shape.
+    existing_consensus = result.get("consensus")
+    if isinstance(existing_consensus, dict) and existing_consensus:
+        provider_mapping = (
+            {str(pd.get("vendor_category")): canonical_category}
+            if pd.get("vendor_category") and canonical_category
+            else {}
+        )
+        existing_consensus["provider_adjudication"] = {
+            "source": "local_provider_merge",
+            "recommended_verdict": provider_recommended_verdict,
+            "confidence": provider_policy.get("confidence") or "low",
+            "reasons": provider_policy.get("reasons", []),
+            "vendor_to_canonical": provider_mapping,
+        }
+        result["consensus"] = existing_consensus
+    else:
+        result["consensus"] = {
+            "enabled": True,
+            "mode": "address_screening",
+            "model": "local_provider_consensus_v1",
+            "consensus_reached": True,
+            "decision": provider_recommended_verdict or result.get("verdict"),
+            "confidence": provider_policy.get("confidence") or "low",
+            "synthesized": True,
+            "reasons": provider_policy.get("reasons", []),
+            "policy_mapping": {
+                "vendor_to_canonical": (
+                    {str(pd.get("vendor_category")): canonical_category}
+                    if pd.get("vendor_category") and canonical_category
+                    else {}
+                ),
+                "block_basis": (
+                    ["sanctions_hit", "provider_policy"]
+                    if pd.get("sanctions_hit")
+                    else (
+                        ["provider_category_match", "provider_policy"]
+                        if provider_recommended_verdict == "BLOCK"
+                        else ["provider_policy"]
+                    )
+                ),
             },
-            {
-                "agent": "Cypher",
-                "codename": "cipher",
-                "aliases": ["Cipher"],
-                "role": "source_of_funds_fifo",
-                "vote": vote_review,
-                "reason": "FIFO source-of-funds continuity assessment.",
-            },
-            {
-                "agent": "Nova",
-                "codename": "nova",
-                "role": "counterparty_and_hop_activity",
-                "vote": vote_clear,
-                "reason": "Counterparty adjacency and hop-activity assessment.",
-            },
-        ],
-        "reasons": provider_policy.get("reasons", []),
-        "evidence_window": {
-            "lookback_days": 30,
-            "hop_depth": 3,
-            "chains": [chain] if chain else [],
-        },
-        "policy_mapping": {
-            "vendor_to_canonical": (
-                {str(pd.get("vendor_category")): canonical_category}
-                if pd.get("vendor_category") and canonical_category
-                else {}
-            ),
-            "block_basis": (
-                ["sanctions_hit", "consensus_majority"]
-                if pd.get("sanctions_hit")
-                else (
-                    ["provider_category_match", "consensus_majority"]
-                    if provider_recommended_verdict == "BLOCK"
-                    else ["consensus_majority"]
-                )
-            ),
-        },
-    }
+        }
     return result
 
 def verdict_color(v):
