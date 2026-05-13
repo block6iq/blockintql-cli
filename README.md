@@ -77,6 +77,12 @@ blockintql status
 
 For keyless pay-per-request access, configure wallet-backed payments locally instead of setting an API key.
 
+Run wallet preflight diagnostics before paid commands:
+
+```bash
+blockintql wallet doctor --agent
+```
+
 If an x402-paid request degrades, BlockINTQL can return a compensation token that can be claimed as API credits:
 
 ```bash
@@ -107,6 +113,7 @@ blockintql verdict --address 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa \
 
 # Recent investigative history
 blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 7
+blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 7 --allow-network-read
 
 # Ethereum transaction details
 blockintql tx --txid 0x683d6d37a97953d369c7295311158b8aa05c88e2ce207da06947a204b4a70ccd
