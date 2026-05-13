@@ -105,53 +105,63 @@ blockintql verdict --address 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa \
   --provider generic \
   --provider-url "https://example.com/screen/{address}"
 
-# Natural language intelligence
-blockintql query "is this address linked to Lazarus Group?"
-
-# Fast wallet triage
-blockintql stats 0xC94eBB328aC25b95DB0E0AA968371885Fa516215
-
 # Recent investigative history
 blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 7
 
-# Plan an investigation and open a recommended workspace
-blockintql ask "Open a deeper stablecoin investigation workspace for this wallet" \
-  --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 \
-  --budget-credits 12 \
-  --open-workspace
+# Ethereum transaction details
+blockintql tx --txid 0x683d6d37a97953d369c7295311158b8aa05c88e2ce207da06947a204b4a70ccd
 
-# Prediction-market investigation workflow
-blockintql prediction market analysis 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+# Stablecoin wallet intelligence
+blockintql stablecoins balances 0xC94eBB328aC25b95DB0E0AA968371885Fa516215
+blockintql stablecoins history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 30
+blockintql stablecoins counterparties 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 30
 
-# Stablecoin flow and holdings charts
-blockintql chart stablecoin-flows --hours 24
-blockintql chart wallet-stablecoin-balances 0x7713974908be4bed47172370115e8b1219f4a5f0
+# Interactive compliance-forensics chat
+blockintql chat "Assess laundering risk for wallet 0x7F19720A857F834887FC9A7bC0a0fBe7Fc7f8102"
 
-# Review the current state of an investigation workspace
-blockintql workspace review <workspace_id>
-
-# Inspect the recent ask / planner / outcome thread
-blockintql workspace conversation <workspace_id> --limit 5
-
-# Continue the same case with a follow-up ask
-blockintql workspace chat <workspace_id> \
-  "Go deeper on counterparties and bridge exposure" \
-  --open-workspace
-
-# Multi-address analysis
-blockintql analyze "check if these wallets transacted with each other" \
-  --address 0x123... \
-  --address 0x456...
-
-# Identity search
-blockintql profile --identifier @lazarus_trader
-
-# Transaction tracing
-blockintql trace --txid abc123... --hops 5
+# Create an image artifact
+blockintql create image "A cinematic beach at sunset, ultra realistic"
 
 # ENS resolution
 blockintql ens vitalik.eth
 ```
+
+## Launch Scope (Public)
+
+Live Now (V1):
+
+- `auth`, `buy`, `capabilities`, `chat`, `compensation`, `history`
+- `login`, `pay`, `provider`, `providers`, `screen`, `status`
+- `verdict`, `wallet`
+
+Likely V1.1 (now live-network feasible):
+
+- `create image`
+- `tx`
+- `stablecoins balances`
+- `stablecoins history`
+- `stablecoins counterparties`
+- `workspace`
+
+Preview commands remain available behind:
+
+```bash
+export BLOCKINTQL_ENABLE_EXPERIMENTAL=1
+```
+
+## Image Output UX
+
+`blockintql create image` always returns a saved file path for lossless output. In terminals with native image protocols (Kitty/iTerm2/WezTerm), inline rendering can be enabled directly in-terminal. If inline rendering is not supported, open the saved path shown in output.
+
+## Launch-Safe Payment Failover
+
+For wallet-backed runs, you can configure a backup API key used only if an x402 payment attempt fails:
+
+```bash
+export BLOCKINTQL_FALLBACK_API_KEY=biq_sk_live_...
+```
+
+When enabled, the CLI retries once with API-key credits and annotates the response payment metadata with `authorization_mode=api_key_fallback`.
 
 ## Agent Mode
 
@@ -210,7 +220,10 @@ Provider adjudication model:
 - Direct sanctions hits become local `BLOCK`.
 - Mapped elevated-risk categories become local `CAUTION` or `BLOCK` based on deterministic policy.
 - Unmapped or proprietary vendor categories do not silently produce `CLEAR`; they degrade to conservative `UNKNOWN` or `CAUTION` policy locally.
+- Deterministic consensus output follows `sonar_consensus_v1` and emits named voters (`Sentinel`, `Cypher`, `Nova`) in `consensus.votes`.
 - This normalization happens in the CLI before terminal output and without sending vendor payloads to BlockINTQL.
+- Canonical deterministic decision contract: [`docs/deterministic-screening-spec-v1.md`](docs/deterministic-screening-spec-v1.md)
+- Public Sonar scope at launch: [`docs/sonar-capability-scope-v1.md`](docs/sonar-capability-scope-v1.md)
 
 Available providers:
 
@@ -223,6 +236,12 @@ Available providers:
 - `merkle_science`
 - `nomis`
 - `generic`
+
+Provider spec confidence:
+
+- `blockintql provider status` and `blockintql provider test` now include `provider_spec` metadata with `status` and `verification`.
+- Treat `provisional` providers as non-production until route/auth/response conformance is confirmed in your tenant.
+- Sweep reference: [`docs/provider-spec-sweep.md`](docs/provider-spec-sweep.md)
 
 Examples:
 
