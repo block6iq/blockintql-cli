@@ -92,6 +92,49 @@ If sanctions hard rule is not triggered:
 - if sanctions hard rule triggers, effective provider risk is forced to `100.0`
 - final score = max(native_score, effective_provider_risk), with sanctions force-clamp to `100.0`
 
+## 5.4 Source-of-Funds FIFO / Reverse-FIFO (Deterministic)
+
+This contract uses deterministic lot accounting for token source-of-funds continuity checks.
+
+### Inputs
+
+- normalized token transfer events with:
+  - `timestamp`
+  - `token_symbol`
+  - `direction` (`inbound|outbound`)
+  - `amount`
+
+### Deterministic lot construction
+
+1. Group events by `token_symbol`.
+2. Sort each token lane by event time ascending.
+3. For each inbound event, append a lot with remaining amount.
+4. For each outbound event, consume remaining amounts from lots in FIFO order.
+
+### Reverse-FIFO view
+
+Implementations MAY expose a reverse walk for operator readability, but accounting outcome must remain equivalent to FIFO lot depletion:
+
+- emitted outbound amount
+- funded portion (matched to prior inbound lots)
+- unfunded portion (`unknown_depletion`)
+
+### Required output metrics
+
+Implementations claiming compatibility should expose:
+
+- `coverage_ratio = funded_outbound / total_outbound` (or `1.0` if outbound is zero)
+- `unknown_depletion` (sum of outbound not matched to prior inbound lots)
+- `total_inbound`
+- `total_outbound`
+
+### Deterministic behavior guarantees
+
+- No randomness in lot selection.
+- Same ordered input events always produce the same depletion result.
+- Negative lot balances are not allowed.
+- Outbound above known inbound is accumulated into `unknown_depletion`.
+
 ## 6. Consensus Contract (Public)
 
 Deterministic consensus payload format:
