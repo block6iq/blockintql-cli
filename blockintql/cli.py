@@ -26,6 +26,7 @@ from .payments import (
     enforce_payment_policy,
     get_evm_private_key,
     load_payment_config,
+    validate_evm_private_key,
 )
 from .providers import adjudicate_provider_result, get_provider, get_provider_spec, list_providers
 from .x402_runtime import request_with_x402
@@ -545,9 +546,19 @@ def _request_with_optional_payment(method, path, *, params=None, body=None, requ
                     "wallet_x402_failed": True,
                 }
                 return _attach_payment_metadata(payload, metadata)
+        failed_details = dict(payment_details)
+        failed_details["phase"] = "x402_execute"
+        failed_details["status_code"] = result.get("status_code")
+        payload = result.get("payload")
+        if isinstance(payload, dict):
+            failed_details["response_error"] = payload.get("error") or payload.get("detail")
+            if payload.get("code"):
+                failed_details["response_code"] = payload.get("code")
+        elif payload:
+            failed_details["response_error"] = str(payload)[:240]
         raise PaymentError(
             "The x402-paid request did not complete successfully.",
-            details=payment_details,
+            details=failed_details,
         )
     payment_metadata = dict(payment_details)
     payment_metadata.update(_build_payment_metadata(payment_config, result.get("receipt")))
@@ -2828,16 +2839,21 @@ def screen(address_arg, address, chain, provider, provider_key, provider_url, ag
 @click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
 @click.option("--days", default=30, show_default=True, type=int)
 @click.option("--limit", default=50, show_default=True, type=int)
+@click.option("--allow-network-read", is_flag=True, help="Allow live network read when primary indexed history is unavailable.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-def history(address_arg, address, chain, days, limit, agent, quiet):
+def history(address_arg, address, chain, days, limit, allow_network_read, agent, quiet):
     """Fetch unified Ethereum wallet history (native + token transfers)."""
     address = coalesce_address(address_arg, address)
     if not address:
         raise click.UsageError("Provide an address as an argument or with --address")
     if not quiet and not agent:
         console.print(f"[dim]Loading {chain} history for {address[:20]}...[/]")
-    result = api_get(f"/v1/eth/address/{address}/history", {"limit": limit, "days": days}, timeout=120)
+    result = api_get(
+        f"/v1/eth/address/{address}/history",
+        {"limit": limit, "days": days, "allow_network_read": allow_network_read},
+        timeout=120,
+    )
     if isinstance(result, dict):
         result.setdefault("address", address)
         if int(result.get("count") or 0) == 0 and result.get("hot_wallet"):
@@ -2872,6 +2888,8 @@ def history(address_arg, address, chain, days, limit, agent, quiet):
                 pass
             if hot_wallet_slice:
                 result["hot_wallet_slice"] = hot_wallet_slice
+    if isinstance(result, dict) and result.get("network_read_available") and not allow_network_read:
+        result.setdefault("next", f"blockintql history {address} --days {days} --limit {limit} --allow-network-read")
     output(result, agent, quiet)
 
 
@@ -4243,6 +4261,55 @@ def wallet_status(agent):
         console.print(f"[yellow]Wallet config exists but the shell is missing {payment_config.private_key_env}.[/]")
     console.print(f"[dim]Auto-pay:[/] {'enabled' if payment_config.auto_pay else 'disabled'}")
     console.print(f"[dim]Max payment:[/] ${payment_config.max_payment_usd}")
+
+
+@wallet.command("doctor")
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def wallet_doctor(agent, quiet):
+    """Run wallet-backed x402 preflight diagnostics."""
+    config = load_config()
+    payment_config = load_payment_config(config)
+    checks = []
+    summary = {"ready": False, "checks": checks}
+
+    if not payment_config:
+        checks.append({"name": "payment_config", "ok": False, "detail": "No wallet payment configuration found."})
+        checks.append({"name": "next", "ok": False, "detail": "Run: blockintql login --auto-pay --max-payment 0.10"})
+        output(summary, agent, quiet)
+        return
+
+    checks.append({"name": "wallet_type", "ok": True, "detail": payment_config.wallet_type})
+    checks.append({"name": "auto_pay", "ok": bool(payment_config.auto_pay), "detail": "enabled" if payment_config.auto_pay else "disabled"})
+
+    key_value = get_evm_private_key(payment_config)
+    validation = validate_evm_private_key(key_value)
+    key_check = {"name": "private_key_format", "ok": bool(validation.get("ok"))}
+    if validation.get("ok"):
+        key_check["detail"] = "valid 0x-prefixed 64-byte hex key"
+    else:
+        key_check["detail"] = validation.get("reason") or "invalid"
+        if "length" in validation:
+            key_check["length"] = validation["length"]
+    checks.append(key_check)
+
+    try:
+        x402_info = api_get("/v1/x402/info", require_auth=False, timeout=20)
+        if isinstance(x402_info, dict) and not x402_info.get("error"):
+            checks.append({"name": "x402_info", "ok": True, "detail": "reachable"})
+        else:
+            checks.append({"name": "x402_info", "ok": False, "detail": str(x402_info.get("error") if isinstance(x402_info, dict) else x402_info)})
+    except Exception as exc:
+        checks.append({"name": "x402_info", "ok": False, "detail": str(exc)})
+
+    summary["ready"] = all(bool(c.get("ok")) for c in checks if c.get("name") not in {"wallet_type"})
+    if not summary["ready"]:
+        summary["next"] = [
+            "Ensure BLOCKINTQL_PRIVATE_KEY is a real 66-char 0x-prefixed hex key",
+            "Run: blockintql login --auto-pay --max-payment 0.10",
+            "Retry with: blockintql verdict --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --agent",
+        ]
+    output(summary, agent, quiet)
 
 
 @compensation.command("claim")

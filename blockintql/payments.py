@@ -104,12 +104,32 @@ def ensure_wallet_runtime_ready(config: PaymentConfig, environ: Optional[Mapping
                 "CDP wallet private key is not available in the environment.",
                 details=build_payment_details(config),
             )
+        key_validation = validate_evm_private_key(get_evm_private_key(config, env))
+        if not key_validation.get("ok"):
+            details = build_payment_details(config)
+            details["reason"] = key_validation.get("reason")
+            if "length" in key_validation:
+                details["length"] = key_validation["length"]
+            raise PaymentConfigurationError(
+                "CDP wallet key is present but format is invalid.",
+                details=details,
+            )
         return
     if config.wallet_type == "privatekey":
         if not (env.get(config.private_key_env) or env.get("EVM_PRIVATE_KEY")):
             raise PaymentConfigurationError(
                 "Private-key wallet is not fully configured.",
                 details=build_payment_details(config),
+            )
+        key_validation = validate_evm_private_key(get_evm_private_key(config, env))
+        if not key_validation.get("ok"):
+            details = build_payment_details(config)
+            details["reason"] = key_validation.get("reason")
+            if "length" in key_validation:
+                details["length"] = key_validation["length"]
+            raise PaymentConfigurationError(
+                "Private-key wallet is configured but key format is invalid.",
+                details=details,
             )
         return
     raise PaymentConfigurationError(
@@ -148,3 +168,16 @@ def get_evm_private_key(config: PaymentConfig, environ: Optional[Mapping[str, st
         if value:
             return value if value.startswith("0x") else f"0x{value}"
     return None
+
+
+def validate_evm_private_key(value: Optional[str]) -> Dict[str, Any]:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return {"ok": False, "reason": "missing"}
+    if not normalized.startswith("0x"):
+        normalized = f"0x{normalized}"
+    if len(normalized) != 66:
+        return {"ok": False, "reason": "invalid_length", "length": len(normalized)}
+    if not re.fullmatch(r"0x[0-9a-fA-F]{64}", normalized):
+        return {"ok": False, "reason": "non_hex_characters"}
+    return {"ok": True, "value": normalized}
