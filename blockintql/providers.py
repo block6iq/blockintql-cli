@@ -441,6 +441,10 @@ PROVIDERS = {
     "generic": GenericProvider,
 }
 
+# Optional provider metadata map used by CLI route hints.
+# Keep default empty so provider lookup never hard-fails if specs are not bundled.
+PROVIDER_SPECS = {}
+
 
 def get_provider(name: str, api_key: str = "", **kwargs):
     cls = PROVIDERS.get(name.lower())

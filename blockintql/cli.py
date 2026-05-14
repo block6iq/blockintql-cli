@@ -44,7 +44,7 @@ BLOCKINTQL_BANNER = """
 [bold white]██╔══██╗██║     ██║   ██║██║     ██╔═██╗ ██║██║╚██╗██║   ██║   ██║▄▄ ██║██║     [/bold white]
 [bold white]██████╔╝███████╗╚██████╔╝╚██████╗██║  ██╗██║██║ ╚████║   ██║   ╚██████╔╝███████╗[/bold white]
 [bold white]╚═════╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝   ╚═╝    ╚══▀▀═╝ ╚══════╝[/bold white]
-[dim]  Sovereign Blockchain Intelligence · blockintql.com[/dim]
+[dim]  On-Chain Intelligence · blockintql.com[/dim]
 """
 
 DEFAULT_API_BASE = "https://blockintql.com"
@@ -96,6 +96,7 @@ class LaunchScopeGroup(click.Group):
         "provider",
         "providers",
         "screen",
+        "screen-tx",
         "status",
         "verdict",
         "wallet",
@@ -129,6 +130,7 @@ class LaunchScopeGroup(click.Group):
 LAUNCH_V1_CAPABILITY_IDS = {
     "verdict",
     "screen",
+    "screen_tx",
     "history",
     "chat",
 }
@@ -2702,7 +2704,7 @@ def _require_experimental(feature: str, next_steps: list[str] | None = None):
 @click.version_option(__version__, prog_name="blockintql")
 @click.pass_context
 def cli(ctx):
-    """BlockINTQL — Sovereign Blockchain Intelligence CLI
+    """BlockINTQL — On-Chain Intelligence CLI
 
     Your provider key never leaves your machine.
     BlockINTQL only receives the address being screened.
@@ -2831,13 +2833,185 @@ def screen(address_arg, address, chain, provider, provider_key, provider_url, ag
     output(result, agent, quiet)
 
 
+def _verdict_payload_for_address(
+    *,
+    address: str,
+    chain: str,
+    context: str,
+    provider: str | None,
+    provider_key: str | None,
+    provider_url: str | None,
+    auth_header: str | None,
+    auth_prefix: str | None,
+    risk_field: str | None,
+    entity_field: str | None,
+):
+    payload = api_post("/v1/verdict", {"address": address, "chain": chain, "context": context})
+    if provider and "error" not in payload:
+        payload = enrich_with_provider(
+            payload,
+            address,
+            chain,
+            provider,
+            provider_key,
+            provider_url,
+            auth_header=auth_header,
+            auth_prefix=auth_prefix,
+            risk_field=risk_field,
+            entity_field=entity_field,
+        )
+    return payload
+
+
+@cli.command("screen-tx")
+@click.option("--txid", "-t", required=True)
+@click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
+@with_provider
+@click.option("--agent", is_flag=True)
+@click.option("--quiet", "-q", is_flag=True)
+def screen_tx(txid, chain, provider, provider_key, provider_url, agent, quiet):
+    """Screen a transaction anchor and return one transaction-level decision."""
+    if not str(txid).startswith("0x") or len(str(txid)) != 66:
+        raise click.UsageError("Ethereum transaction hashes must be passed as 0x-prefixed 66-character values.")
+
+    if not quiet and not agent:
+        p_info = f" + {provider} (local)" if provider else ""
+        console.print(f"[dim]Screening transaction {txid[:20]}...{p_info}[/]")
+
+    tx_result = api_get(f"/v1/eth/tx/{txid}/verbose")
+    if "error" in tx_result:
+        output(tx_result, agent, quiet)
+        return
+
+    tx_data = (tx_result or {}).get("data") or {}
+    from_address = tx_data.get("from")
+    to_address = tx_data.get("to")
+    if not from_address or not to_address:
+        output(
+            {
+                "error": "Transaction payload is missing from/to addresses.",
+                "txid": txid,
+                "source": tx_result.get("source"),
+            },
+            agent,
+            quiet,
+        )
+        return
+
+    provider_settings = get_provider_configured_settings(provider)
+    provider = provider or provider_settings.get("provider")
+    provider_key = provider_key or provider_settings.get("provider_key")
+    provider_url = provider_url or provider_settings.get("provider_url")
+    auth_header = provider_settings.get("auth_header")
+    auth_prefix = provider_settings.get("auth_prefix")
+    risk_field = provider_settings.get("risk_field")
+    entity_field = provider_settings.get("entity_field")
+
+    context = f"transaction_anchor:{txid}"
+    from_verdict = _verdict_payload_for_address(
+        address=from_address,
+        chain=chain,
+        context=context,
+        provider=provider,
+        provider_key=provider_key,
+        provider_url=provider_url,
+        auth_header=auth_header,
+        auth_prefix=auth_prefix,
+        risk_field=risk_field,
+        entity_field=entity_field,
+    )
+    to_verdict = _verdict_payload_for_address(
+        address=to_address,
+        chain=chain,
+        context=context,
+        provider=provider,
+        provider_key=provider_key,
+        provider_url=provider_url,
+        auth_header=auth_header,
+        auth_prefix=auth_prefix,
+        risk_field=risk_field,
+        entity_field=entity_field,
+    )
+
+    if "error" in from_verdict or "error" in to_verdict:
+        output(
+            {
+                "error": "Unable to compute transaction-level decision because one or more counterparty verdicts failed.",
+                "txid": txid,
+                "tx_source": tx_result.get("source"),
+                "from_verdict_error": from_verdict.get("error"),
+                "to_verdict_error": to_verdict.get("error"),
+            },
+            agent,
+            quiet,
+        )
+        return
+
+    from_decision = str(from_verdict.get("verdict") or "CAUTION").upper()
+    to_decision = str(to_verdict.get("verdict") or "CAUTION").upper()
+    decisions = {from_decision, to_decision}
+    if "BLOCK" in decisions:
+        tx_decision = "BLOCK"
+    elif "CAUTION" in decisions:
+        tx_decision = "CAUTION"
+    else:
+        tx_decision = "CLEAR"
+
+    tx_risk_score = max(
+        _as_float(from_verdict.get("risk_score"), 0.0),
+        _as_float(to_verdict.get("risk_score"), 0.0),
+    )
+
+    result = {
+        "subject": txid,
+        "subject_type": "transaction",
+        "chain": chain,
+        "verdict": tx_decision,
+        "safe": tx_decision == "CLEAR",
+        "risk_score": tx_risk_score,
+        "action": "block" if tx_decision == "BLOCK" else ("review" if tx_decision == "CAUTION" else "allow"),
+        "tx": {
+            "txid": txid,
+            "source": tx_result.get("source"),
+            "from": from_address,
+            "to": to_address,
+            "value_eth": tx_data.get("value_eth"),
+            "block_number": tx_data.get("block_number"),
+            "status": tx_data.get("status"),
+        },
+        "counterparty_verdicts": {
+            "from": from_verdict,
+            "to": to_verdict,
+        },
+        "consensus": {
+            "mode": "transaction_anchor_screening",
+            "anchor": txid,
+            "decision_rule": "max_risk_across_counterparties",
+            "counterparty_decisions": {
+                "from": from_decision,
+                "to": to_decision,
+            },
+            "reasons": [
+                f"from={from_decision} risk={_as_float(from_verdict.get('risk_score'), 0.0)}",
+                f"to={to_decision} risk={_as_float(to_verdict.get('risk_score'), 0.0)}",
+            ],
+        },
+    }
+    output(result, agent, quiet)
+
+
 @cli.command()
 @click.argument("address_arg", required=False)
 @click.option("--address", "-a", required=False)
 @click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
 @click.option("--days", default=30, show_default=True, type=int)
 @click.option("--limit", default=50, show_default=True, type=int)
-@click.option("--allow-network-read", is_flag=True, help="Allow live network read when primary indexed history is unavailable.")
+@click.option(
+    "--allow-network-read/--indexed-only",
+    default=True,
+    show_default=True,
+    help="Use live network read when primary indexed history is unavailable.",
+)
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def history(address_arg, address, chain, days, limit, allow_network_read, agent, quiet):
