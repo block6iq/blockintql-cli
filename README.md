@@ -113,7 +113,7 @@ blockintql verdict --address 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa \
 
 # Recent investigative history
 blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 7
-blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 7 --allow-network-read
+blockintql history 0xC94eBB328aC25b95DB0E0AA968371885Fa516215 --days 7 --indexed-only
 
 # Ethereum transaction details
 blockintql tx --txid 0x683d6d37a97953d369c7295311158b8aa05c88e2ce207da06947a204b4a70ccd
@@ -137,9 +137,9 @@ blockintql ens vitalik.eth
 
 Live Now (V1):
 
-- `auth`, `buy`, `capabilities`, `chat`, `compensation`, `history`
+- `auth`, `buy`, `capabilities`, `chat`, `compensation`, `create`, `history`
 - `login`, `pay`, `provider`, `providers`, `screen`, `status`
-- `verdict`, `wallet`
+- `stablecoins`, `tx`, `verdict`, `wallet`, `workspace`
 
 Preview commands remain available behind:
 
@@ -148,11 +148,6 @@ export BLOCKINTQL_ENABLE_EXPERIMENTAL=1
 ```
 
 Preview command surfaces currently include:
-
-- `create`
-- `stablecoins`
-- `tx`
-- `workspace`
 - additional preview command groups shown in `blockintql --help`
 
 ## Image Output UX
@@ -272,7 +267,7 @@ BlockINTQL is Ethereum-first for V1 launch screening workflows.
   - entity badge when known
   - movement summary
   - lead counterparty
-- Preview analytics (stablecoins/stats/tx/workspace) remain available behind `BLOCKINTQL_ENABLE_EXPERIMENTAL=1`.
+- Additional preview analytics remain available behind `BLOCKINTQL_ENABLE_EXPERIMENTAL=1`.
 
 Example:
 

@@ -3006,7 +3006,12 @@ def screen_tx(txid, chain, provider, provider_key, provider_url, agent, quiet):
 @click.option("--chain", "-c", default="ethereum", type=click.Choice(["ethereum"]))
 @click.option("--days", default=30, show_default=True, type=int)
 @click.option("--limit", default=50, show_default=True, type=int)
-@click.option("--allow-network-read", is_flag=True, help="Allow live network read when primary indexed history is unavailable.")
+@click.option(
+    "--allow-network-read/--indexed-only",
+    default=True,
+    show_default=True,
+    help="Use live network read when primary indexed history is unavailable.",
+)
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
 def history(address_arg, address, chain, days, limit, allow_network_read, agent, quiet):
