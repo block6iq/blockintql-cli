@@ -90,6 +90,7 @@ class LaunchScopeGroup(click.Group):
         "capabilities",
         "chat",
         "compensation",
+        "ens",
         "history",
         "login",
         "pay",
@@ -97,7 +98,10 @@ class LaunchScopeGroup(click.Group):
         "providers",
         "screen",
         "screen-tx",
+        "stablecoins",
+        "stats",
         "status",
+        "tx",
         "verdict",
         "wallet",
     }
@@ -1364,6 +1368,7 @@ def describe_data_source(source):
         "node_fallback": "live node fallback",
         "postgres_unavailable": "indexed history temporarily unavailable",
         "postgres_stale": "indexed history catching up",
+        "on_chain_intelligence": "on-chain intelligence",
     }
     return labels.get(str(source or "").strip(), str(source or "unknown"))
 
@@ -1400,10 +1405,15 @@ def print_next_steps(*commands):
 
 
 def render_wallet_history_report(result):
-    rows = list((result or {}).get("data") or [])
+    data = (result or {}).get("data") or {}
+    if isinstance(data, dict):
+        rows = list(data.get("rows") or [])
+        window_days = int(data.get("window_days") or (result or {}).get("window_days") or 0)
+    else:
+        rows = list(data or [])
+        window_days = int((result or {}).get("window_days") or 0)
     address = (result or {}).get("address") or ""
     total = int((result or {}).get("count") or len(rows))
-    window_days = int((result or {}).get("window_days") or 0)
     hot_wallet = bool((result or {}).get("hot_wallet"))
     hot_wallet_source = str((result or {}).get("hot_wallet_source") or "").strip()
     hot_wallet_entity = str((result or {}).get("hot_wallet_entity") or "").strip()
@@ -3073,14 +3083,6 @@ def history(address_arg, address, chain, days, limit, allow_network_read, agent,
 @click.option("--quiet", "-q", is_flag=True)
 def stats(address_arg, address, chain, agent, quiet):
     """Fetch wallet stats for an Ethereum address."""
-    _require_experimental(
-        "wallet stats",
-        next_steps=[
-            "blockintql history <address>",
-            "blockintql screen <address>",
-            "blockintql verdict <address>",
-        ],
-    )
     address = coalesce_address(address_arg, address)
     if not address:
         raise click.UsageError("Provide an address as an argument or with --address")
@@ -3481,14 +3483,6 @@ def eth_history(address, days, limit, agent, quiet):
 @click.option("--quiet", "-q", is_flag=True)
 def eth_stats(address, agent, quiet):
     """Fetch wallet stats for an Ethereum address."""
-    _require_experimental(
-        "wallet stats",
-        next_steps=[
-            "blockintql history <address>",
-            "blockintql screen <address>",
-            "blockintql verdict <address>",
-        ],
-    )
     result = api_get(f"/v1/eth/address/{address}/stats")
     if isinstance(result, dict):
         result.setdefault("address", address)
@@ -3501,13 +3495,6 @@ def eth_stats(address, agent, quiet):
 @click.option("--quiet", "-q", is_flag=True)
 def eth_tx(txid, agent, quiet):
     """Fetch verbose Ethereum transaction details."""
-    _require_experimental(
-        "transaction verbose lookup",
-        next_steps=[
-            "blockintql history <address>",
-            "blockintql screen <address>",
-        ],
-    )
     result = api_get(f"/v1/eth/tx/{txid}/verbose")
     output(result, agent, quiet)
 
@@ -3542,14 +3529,7 @@ def eth_screen(address, provider, provider_key, provider_url, agent, quiet):
 @eth.group("stablecoins")
 def eth_stablecoins():
     """Ethereum stablecoin analytics namespace."""
-    _require_experimental(
-        "stablecoin analytics",
-        next_steps=[
-            "blockintql history <address>",
-            "blockintql screen <address>",
-            "blockintql chat --interactive",
-        ],
-    )
+    return None
 
 
 @eth_stablecoins.command("balances")
@@ -4942,13 +4922,6 @@ def workspace_manifest(workspace_id, agent, quiet):
     output(api_get(f"/v1/workspaces/{workspace_id}/manifest", require_auth=True), agent, quiet)
 
 
-def main():
-    cli()
-
-if __name__ == "__main__":
-    main()
-
-
 @cli.command()
 @click.argument("name")
 @click.option("--agent", is_flag=True)
@@ -4961,14 +4934,15 @@ def ens(name, agent, quiet):
       blockintql ens vitalik.eth
       blockintql ens blockint.eth
     """
-    _require_experimental(
-        "ENS resolution",
-        next_steps=[
-            "blockintql history <address>",
-            "blockintql screen <address>",
-        ],
-    )
     if not quiet and not agent:
         console.print(f"[dim]Resolving {name}...[/]")
     result = api_get(f"/v1/eth/ens/{name}")
     output(result, agent, quiet)
+
+
+def main():
+    cli()
+
+
+if __name__ == "__main__":
+    main()

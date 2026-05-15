@@ -137,9 +137,9 @@ blockintql ens vitalik.eth
 
 Live Now (V1):
 
-- `auth`, `buy`, `capabilities`, `chat`, `compensation`, `create`, `history`
+- `auth`, `buy`, `capabilities`, `chat`, `compensation`, `ens`, `history`
 - `login`, `pay`, `provider`, `providers`, `screen`, `status`
-- `stablecoins`, `tx`, `verdict`, `wallet`, `workspace`
+- `stablecoins`, `stats`, `tx`, `verdict`, `wallet`
 
 Preview commands remain available behind:
 
