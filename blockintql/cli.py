@@ -2718,6 +2718,15 @@ def cli(ctx):
     BlockINTQL only receives the address being screened.
     """
     if ctx.invoked_subcommand is None:
+        console.print(BLOCKINTQL_BANNER)
+        console.print()
+        console.print("[dim]Defaulting to interactive BlockINTQL Chat (grounded).[/dim]")
+        console.print("[dim]Requires an API key (or wallet via `login`). Set BLOCKINTQL_API_KEY or run `blockintql auth`.[/dim]")
+        console.print("[dim]Other commands: screen, verdict, history, status, providers, chart, graph, ... (see --help).[/dim]")
+        console.print()
+        console.print("[bold]Try this first prompt:[/bold]")
+        console.print("  Screen 0x742d35Cc6634C0532925a3b844Bc9e7595f6EEd0 and create a chart for the last 30 days.")
+        console.print()
         _run_chat_repl(grounded=True)
         return
 
@@ -3715,6 +3724,11 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
     active_session_id = (session_id or "").strip() or None
     if not quiet and not agent:
         console.print(Panel("BLOCKINTQL", title="BlockINTQL Chat", border_style="cyan", width=70))
+        if not get_api_key() and not _wallet_ready_for_requests():
+            console.print("[dim]No API key configured. Set BLOCKINTQL_API_KEY or run `blockintql auth --api-key ...`[/dim]")
+            console.print("[dim]For local dev testing (free, no credits): export BLOCKINTQL_API_URL=http://127.0.0.1:8000 + the admin key[/dim]")
+            console.print("[dim]Wallet mode: blockintql login --auto-pay[/dim]")
+            console.print()
     while True:
         try:
             raw = console.input("[bold cyan]>[/bold cyan] ").strip()
@@ -3725,6 +3739,12 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
         if not raw:
             continue
         lowered = raw.lower()
+        # Helpful hint if user types shell-like commands inside the chat REPL
+        if any(lowered.startswith(p) for p in ("export ", "cd ", "cat ", "ls ", "~/", "./")):
+            console.print("  [yellow]You're inside the BlockINTQL Chat REPL.[/yellow]")
+            console.print("  [dim]Type /exit (or Ctrl+D) to return to your normal shell prompt.[/dim]")
+            console.print("  [dim]Shell commands (export, cat, etc.) are sent as chat messages to the API.[/dim]")
+            continue
         if lowered in {"/exit", "exit", "quit", "/quit"}:
             console.print("  [dim]ended[/dim]")
             return
@@ -3744,6 +3764,18 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
         result = api_post(endpoint, payload, require_auth=True, timeout=120)
         if isinstance(result, dict) and result.get("session_id"):
             active_session_id = result.get("session_id")
+        err_text = str((result or {}).get("error") or "") if isinstance(result, dict) else ""
+        if "Invalid API key" in err_text or "API key required" in err_text:
+            err_console.print("  [red]✗ Invalid API key[/red]")
+            err_console.print("  Quick fixes:")
+            err_console.print("    export BLOCKINTQL_API_KEY=biq_sk_live_...")
+            err_console.print("    blockintql auth --api-key biq_sk_live_...")
+            err_console.print("  Local dev bypass (recommended for testing this chat):")
+            err_console.print("    export BLOCKINTQL_API_URL=http://127.0.0.1:8000")
+            err_console.print("    export BLOCKINTQL_API_KEY=biq_sk_live_NN_KYJVZ8-yl0HLWO7xjibKfMXnaUxIQ")
+            err_console.print("    (start the local server with the admin bypass first)")
+            err_console.print("  Or wallet: blockintql login --auto-pay --max-payment 0.10")
+            continue
         if grounded and isinstance(result, dict) and result.get("narrative") and isinstance(result.get("blockintql"), dict):
             _render_grounded_chat_box(result)
         else:
@@ -3806,6 +3838,19 @@ def _render_grounded_chat_box(data):
     if cost:
         ch = cost.get("credits_charged", 0)
         console.print(f"  [dim]cost:[/dim] {ch} credits")
+    # Support compound chat responses that include chart data (e.g. "screen X and create a chart")
+    chart = data.get("chart") or {}
+    if chart:
+        tok = chart.get("token", "USDC")
+        days = chart.get("days", 30)
+        ina = float(chart.get("in", 0))
+        outa = float(chart.get("out", 0))
+        net = float(chart.get("net", ina - outa))
+        # simple bar using existing helper
+        peak = max(ina, outa, 1.0)
+        in_bar = _bar(ina, peak, width=14)
+        out_bar = _bar(outa, peak, width=14)
+        console.print(f"  [dim]{days}d {tok} chart[/dim]  in {ina:,.0f} {in_bar}  out {outa:,.0f} {out_bar}  net {net:+,.0f}")
     console.print()
 
 

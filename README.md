@@ -63,6 +63,68 @@ pip install .
 python3 -m blockintql --help
 ```
 
+## Update
+
+To get the latest released version:
+
+```bash
+pip install --upgrade blockintql
+```
+
+To get the absolute latest development version (new features before official release):
+
+```bash
+pip install --upgrade git+https://github.com/block6iq/blockintql-cli.git
+```
+
+After updating, you can verify with:
+
+```bash
+blockintql --version
+```
+
+## Quick start (new default experience)
+
+Typing the bare command now launches the interactive chat directly:
+
+```
+blockintql
+```
+
+You will see the banner, a note that chat is the default, a recommended first prompt, and then the chat prompt (`>`).
+
+Example first prompt that exercises screening + charts:
+
+```
+Screen 0x742d35Cc6634C0532925a3b844Bc9e7595f6EEd0 and create a chart for the last 30 days.
+```
+
+### Requirements
+Chat (and most commands) require either:
+- A BlockINTQL API key, or
+- Wallet-backed x402 payments (`blockintql login --auto-pay`).
+
+If you see `✗ Invalid API key` inside chat:
+- `export BLOCKINTQL_API_KEY=biq_sk_live_...`
+- or `blockintql auth --api-key biq_sk_live_...`
+- then retry the prompt.
+
+### Local dev testing (free, no credits, full rich panels)
+Use the special admin bypass key against a local server (the server must be running with the dev bypass enabled):
+
+```bash
+export BLOCKINTQL_API_URL=http://127.0.0.1:8000
+export BLOCKINTQL_API_KEY=biq_sk_live_NN_KYJVZ8-yl0HLWO7xjibKfMXnaUxIQ
+
+# Start the local server (see dev instructions or the blockintql repo)
+# Then in another shell:
+blockintql
+# Paste the recommended prompt above. You should get a grounded CAUTION response
+# with risk score, citations, and 0 credits charged.
+```
+
+See `blockintql --help` for the full Live Now (V1) command list (chat is now the primary entry point).
+
 ## Setup
 
 Set your API key with either an environment variable or the local config file:
