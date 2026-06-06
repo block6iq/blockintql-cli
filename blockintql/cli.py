@@ -3838,6 +3838,19 @@ def _render_grounded_chat_box(data):
     if cost:
         ch = cost.get("credits_charged", 0)
         console.print(f"  [dim]cost:[/dim] {ch} credits")
+    # Support compound chat responses that include chart data (e.g. "screen X and create a chart")
+    chart = data.get("chart") or {}
+    if chart:
+        tok = chart.get("token", "USDC")
+        days = chart.get("days", 30)
+        ina = float(chart.get("in", 0))
+        outa = float(chart.get("out", 0))
+        net = float(chart.get("net", ina - outa))
+        # simple bar using existing helper
+        peak = max(ina, outa, 1.0)
+        in_bar = _bar(ina, peak, width=14)
+        out_bar = _bar(outa, peak, width=14)
+        console.print(f"  [dim]{days}d {tok} chart[/dim]  in {ina:,.0f} {in_bar}  out {outa:,.0f} {out_bar}  net {net:+,.0f}")
     console.print()
 
 
