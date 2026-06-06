@@ -2718,6 +2718,14 @@ def cli(ctx):
     BlockINTQL only receives the address being screened.
     """
     if ctx.invoked_subcommand is None:
+        console.print(BLOCKINTQL_BANNER)
+        console.print()
+        console.print("[dim]Defaulting to interactive BlockINTQL Chat (grounded).[/dim]")
+        console.print("[dim]Other commands: screen, verdict, history, status, providers, chart, graph, ... (see --help).[/dim]")
+        console.print()
+        console.print("[bold]Try this first prompt:[/bold]")
+        console.print("  Screen 0x742d35Cc6634C0532925a3b844Bc9e7595f6EEd0 and create a chart for the last 30 days.")
+        console.print()
         _run_chat_repl(grounded=True)
         return
 
