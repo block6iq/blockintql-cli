@@ -3525,11 +3525,11 @@ def query(query, agent, quiet):
     output(result, agent, quiet)
 
 
-def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=False, quiet=False):
+def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=False, quiet=False, grounded=True):
     active_session_id = (session_id or "").strip() or None
     if not quiet and not agent:
         console.print()
-        console.print("  [bold cyan]BLOCKINTQL CHAT[/bold cyan]")
+        console.print("  [bold cyan]BLOCKINTQL CHAT (Grok-style, grounded)[/bold cyan]")
         console.print(f"  [dim]{'─' * 52}[/dim]")
         console.print("  [dim]Type your question and press Enter.[/dim]")
         console.print("  [dim]/exit to quit · /new to start a fresh session · /session to show current session[/dim]")
@@ -3559,12 +3559,13 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
         if lowered in {"/session", "session"}:
             console.print(f"  [dim]current session:[/dim] {active_session_id or 'none'}")
             continue
-        payload = {"message": raw, "chain": chain}
+        payload = {"message": raw, "chain": chain, "grounded": grounded}
         if active_session_id:
             payload["session_id"] = active_session_id
         if address:
             payload["address"] = address
-        result = api_post("/v1/chat", payload, require_auth=True, timeout=120)
+        endpoint = "/v1/blockintql-ask" if grounded else "/v1/chat"
+        result = api_post(endpoint, payload, require_auth=True, timeout=120)
         if isinstance(result, dict) and result.get("session_id"):
             active_session_id = result.get("session_id")
         output(result, agent, quiet)
@@ -3578,12 +3579,10 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
 @click.option("--interactive", "-i", is_flag=True, help="Start multi-turn interactive chat mode.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-@click.option("--grounded", is_flag=True, help="Use BlockINTQL deterministic grounded mode")
+@click.option("--grounded/--no-grounded", default=True, help="Use BlockINTQL deterministic grounded mode (Grok-style chat)")
 def chat(message, session_id, address, chain, interactive, agent, quiet, grounded):
-    """Scoped multi-turn compliance and blockchain forensics chat."""
+    """Grok-style multi-turn chat with BlockINTQL grounded deterministic responses."""
     message_text = " ".join(message).strip()
-    if grounded:
-        pass
     if interactive or not message_text:
         _run_chat_repl(
             session_id=session_id,
@@ -3591,16 +3590,19 @@ def chat(message, session_id, address, chain, interactive, agent, quiet, grounde
             chain=chain,
             agent=agent,
             quiet=quiet,
+            grounded=grounded,
         )
         return
     if not quiet and not agent:
-        console.print("[dim]Chatting with BlockINTQL...[/]")
-    payload = {"message": message_text, "chain": chain}
+        console.print("[dim]Chatting with BlockINTQL (grounded)...[/]")
+    payload = {"message": message_text, "chain": chain, "grounded": grounded}
     if session_id:
         payload["session_id"] = session_id
     if address:
         payload["address"] = address
-    result = api_post("/v1/chat", payload, require_auth=True, timeout=120)
+    # Use grounded endpoint when enabled
+    endpoint = "/v1/blockintql-ask" if grounded else "/v1/chat"
+    result = api_post(endpoint, payload, require_auth=True, timeout=120)
     output(result, agent, quiet)
 
 
