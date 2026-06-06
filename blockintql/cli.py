@@ -90,8 +90,10 @@ class LaunchScopeGroup(click.Group):
         "auth",
         "buy",
         "capabilities",
+        "chart",
         "chat",
         "compensation",
+        "graph",
         "history",
         "login",
         "pay",
@@ -2716,10 +2718,8 @@ def cli(ctx):
     BlockINTQL only receives the address being screened.
     """
     if ctx.invoked_subcommand is None:
-        console.print(BLOCKINTQL_BANNER)
-        click.echo(ctx.get_help())
-        console.print()
-        console.print("[dim]Wallet-based access:[/] [bold]blockintql login --auto-pay --max-payment 0.10[/]")
+        _run_chat_repl(grounded=True)
+        return
 
 @cli.command()
 @click.option("--api-key", required=True)
@@ -3154,25 +3154,15 @@ def stablecoins(ctx):
 @cli.group()
 def chart():
     """Render terminal-native charts for supported analytics endpoints."""
-    _require_experimental(
-        "terminal charts",
-        next_steps=[
-            "blockintql history <address>",
-            "blockintql chat --interactive",
-        ],
-    )
 
 
-@cli.group()
-def graph():
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def graph(ctx):
     """Promptable graph shell and explorer commands."""
-    _require_experimental(
-        "graph shell and explorer",
-        next_steps=[
-            "blockintql chat --interactive",
-            "blockintql history <address>",
-        ],
-    )
+    if ctx.invoked_subcommand is None:
+        _run_graph_prompt_repl()
+        return
 
 
 @graph.command("shell")
@@ -3724,7 +3714,7 @@ def query(query, agent, quiet):
 def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=False, quiet=False, grounded=True):
     active_session_id = (session_id or "").strip() or None
     if not quiet and not agent:
-        console.print(Panel("BLOCKINTQL", title="Grok-style chat", border_style="cyan", width=70))
+        console.print(Panel("BLOCKINTQL", title="BlockINTQL Chat", border_style="cyan", width=70))
     while True:
         try:
             raw = console.input("[bold cyan]>[/bold cyan] ").strip()
@@ -3770,7 +3760,11 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
 @click.option("--quiet", "-q", is_flag=True)
 @click.option("--grounded/--no-grounded", default=True, help="BlockINTQL grounded mode")
 def chat(message, session_id, address, chain, interactive, agent, quiet, grounded):
-    """Grok-style multi-turn chat."""
+    """BlockINTQL Chat.
+
+    Run bare (no MESSAGE) or with --interactive to start the REPL.
+    Provide MESSAGE for a single grounded turn.
+    """
     message_text = " ".join(message).strip()
     if interactive or not message_text:
         _run_chat_repl(
@@ -3813,6 +3807,44 @@ def _render_grounded_chat_box(data):
         ch = cost.get("credits_charged", 0)
         console.print(f"  [dim]cost:[/dim] {ch} credits")
     console.print()
+
+
+def _run_graph_prompt_repl():
+    console.print(Panel("BlockINTQL Graph Shell", border_style="cyan", width=70))
+    console.print("[dim]Type a prompt to compile a deterministic shell spec. /exit to quit.[/dim]")
+    while True:
+        try:
+            raw = console.input("[bold cyan]graph>[/bold cyan] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            console.print("  [dim]ended[/dim]")
+            return
+        if not raw:
+            continue
+        lowered = raw.lower()
+        if lowered in {"/exit", "exit", "quit", "/quit"}:
+            console.print("  [dim]ended[/dim]")
+            return
+        if lowered in {"/help", "help", "?"}:
+            console.print("  [dim]Enter natural language (e.g. \"executive summary, graph first, wide drawer for mixer flows\").[/dim]")
+            continue
+        compiled = compile_graph_shell_prompt(raw)
+        payload = {
+            "surface": "graph_shell",
+            "prompt": raw,
+            "shell_spec": compiled.get("spec") or {},
+            "matched_rules": compiled.get("matched_rules") or [],
+        }
+        explorer_base = get_graph_shell_base()
+        if explorer_base:
+            payload["explorer_url"] = build_graph_shell_url(
+                explorer_base,
+                prompt=raw,
+                spec=payload["shell_spec"],
+                seed=None,
+            )
+        output(payload, agent=False, quiet=False)
+        console.print("[dim]refine with another prompt or /exit[/dim]")
 
 
 @cli.group()
