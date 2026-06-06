@@ -19,6 +19,8 @@ import httpx
 from rich.console import Console
 from rich.table import Table
 from rich import box
+from rich.panel import Panel
+from rich.text import Text
 from . import __version__
 from .payments import (
     PaymentError,
@@ -2061,6 +2063,10 @@ def output(data, agent, quiet):
             console.print(f"  [dim]claim    [/dim] blockintql compensation claim --token {token}")
             console.print(f"  [dim]{'─' * 52}[/dim]")
 
+    if isinstance(data, dict) and data.get("narrative") and isinstance(data.get("blockintql"), dict):
+        _render_grounded_chat_box(data)
+        return
+
     if data.get("surface") == "graph_shell" and data.get("shell_spec"):
         console.print()
         console.print("  [bold cyan]GRAPH SHELL[/bold cyan]")
@@ -3715,65 +3721,57 @@ def query(query, agent, quiet):
     output(result, agent, quiet)
 
 
-def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=False, quiet=False):
+def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=False, quiet=False, grounded=True):
     active_session_id = (session_id or "").strip() or None
     if not quiet and not agent:
-        console.print()
-        console.print("  [bold cyan]BLOCKINTQL CHAT[/bold cyan]")
-        console.print(f"  [dim]{'─' * 52}[/dim]")
-        console.print("  [dim]Type your question and press Enter.[/dim]")
-        console.print("  [dim]/exit to quit · /new to start a fresh session · /session to show current session[/dim]")
-        console.print(f"  [dim]chain    [/dim] {chain}")
-        if address:
-            console.print(f"  [dim]address  [/dim] {address}")
-        if active_session_id:
-            console.print(f"  [dim]session  [/dim] {active_session_id}")
-        console.print(f"  [dim]{'─' * 52}[/dim]")
+        console.print(Panel("BLOCKINTQL", title="Grok-style chat", border_style="cyan", width=70))
     while True:
         try:
-            raw = console.input("[bold cyan]you>[/bold cyan] ").strip()
+            raw = console.input("[bold cyan]>[/bold cyan] ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
-            console.print("  [dim]Chat ended.[/dim]")
+            console.print("  [dim]ended[/dim]")
             return
         if not raw:
             continue
         lowered = raw.lower()
         if lowered in {"/exit", "exit", "quit", "/quit"}:
-            console.print("  [dim]Chat ended.[/dim]")
+            console.print("  [dim]ended[/dim]")
             return
         if lowered in {"/new", "new"}:
             active_session_id = None
-            console.print("  [dim]Started a new chat session.[/dim]")
+            console.print("  [dim]new[/dim]")
             continue
         if lowered in {"/session", "session"}:
-            console.print(f"  [dim]current session:[/dim] {active_session_id or 'none'}")
+            console.print(f"  [dim]session:[/dim] {active_session_id or 'none'}")
             continue
-        payload = {"message": raw, "chain": chain}
+        payload = {"message": raw, "chain": chain, "grounded": grounded}
         if active_session_id:
             payload["session_id"] = active_session_id
         if address:
             payload["address"] = address
-        result = api_post("/v1/chat", payload, require_auth=True, timeout=120)
+        endpoint = "/v1/blockintql-ask" if grounded else "/v1/chat"
+        result = api_post(endpoint, payload, require_auth=True, timeout=120)
         if isinstance(result, dict) and result.get("session_id"):
             active_session_id = result.get("session_id")
-        output(result, agent, quiet)
+        if grounded and isinstance(result, dict) and result.get("narrative") and isinstance(result.get("blockintql"), dict):
+            _render_grounded_chat_box(result)
+        else:
+            output(result, agent, quiet)
 
 
 @cli.command()
-@click.argument("message", nargs=-1, required=False)
+@click.argument("message", nargs=-1, required=False, metavar="[MESSAGE]")
 @click.option("--session-id", default=None, help="Continue an existing BlockINTQL chat session.")
 @click.option("--address", "-a", default=None, help="Optional address to anchor the chat turn.")
 @click.option("--chain", "-c", default="ethereum", type=click.Choice(["bitcoin", "ethereum"]))
 @click.option("--interactive", "-i", is_flag=True, help="Start multi-turn interactive chat mode.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-@click.option("--grounded", is_flag=True, help="Use BlockINTQL deterministic grounded mode")
+@click.option("--grounded/--no-grounded", default=True, help="BlockINTQL grounded mode")
 def chat(message, session_id, address, chain, interactive, agent, quiet, grounded):
-    """Scoped multi-turn compliance and blockchain forensics chat."""
+    """Grok-style multi-turn chat."""
     message_text = " ".join(message).strip()
-    if grounded:
-        pass
     if interactive or not message_text:
         _run_chat_repl(
             session_id=session_id,
@@ -3781,17 +3779,40 @@ def chat(message, session_id, address, chain, interactive, agent, quiet, grounde
             chain=chain,
             agent=agent,
             quiet=quiet,
+            grounded=grounded,
         )
         return
     if not quiet and not agent:
         console.print("[dim]Chatting with BlockINTQL...[/]")
-    payload = {"message": message_text, "chain": chain}
+    payload = {"message": message_text, "chain": chain, "grounded": grounded}
     if session_id:
         payload["session_id"] = session_id
     if address:
         payload["address"] = address
-    result = api_post("/v1/chat", payload, require_auth=True, timeout=120)
+    endpoint = "/v1/blockintql-ask" if grounded else "/v1/chat"
+    result = api_post(endpoint, payload, require_auth=True, timeout=120)
     output(result, agent, quiet)
+
+
+def _render_grounded_chat_box(data):
+    block = data.get("blockintql") or {}
+    narrative = data.get("narrative") or ""
+    citations = data.get("citations") or []
+    cost = data.get("cost") or {}
+    v = block.get("verdict", "UNKNOWN")
+    risk = block.get("risk_score", 0)
+    safe = block.get("safe", True)
+    color = "green" if v == "CLEAR" else ("yellow" if v == "CAUTION" else "red")
+    console.print()
+    console.print(Panel(f"[bold {color}]{v}[/bold {color}]  risk {risk}/100  {'SAFE' if safe else 'BLOCK'}", title="BLOCKINTQL", border_style=color, width=70))
+    if narrative:
+        console.print(Panel(narrative, title="Response", border_style="dim", width=70))
+    if citations:
+        console.print("  [dim]citations:[/dim] " + ", ".join(citations))
+    if cost:
+        ch = cost.get("credits_charged", 0)
+        console.print(f"  [dim]cost:[/dim] {ch} credits")
+    console.print()
 
 
 @cli.group()
