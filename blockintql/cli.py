@@ -3851,6 +3851,27 @@ def _render_grounded_chat_box(data):
         in_bar = _bar(ina, peak, width=14)
         out_bar = _bar(outa, peak, width=14)
         console.print(f"  [dim]{days}d {tok} chart[/dim]  in {ina:,.0f} {in_bar}  out {outa:,.0f} {out_bar}  net {net:+,.0f}")
+    # Render per-agent votes when the server returns proper sonar_consensus_v1 (so agents are visibly voting on real work, not just labels)
+    cs = data.get("consensus") or {}
+    if cs.get("model") == "sonar_consensus_v1" or cs.get("votes"):
+        vote_split = cs.get("vote_split") or {}
+        console.print(f"  [dim]─[/dim]")
+        console.print("  [dim]SONAR CONSENSUS (3 agents voted)[/dim]")
+        if vote_split:
+            console.print(
+                f"  [dim]split   [/dim] block={vote_split.get('block', 0)} review={vote_split.get('review', 0)} clear={vote_split.get('clear', 0)}"
+            )
+        for row in (cs.get("votes") or [])[:3]:
+            agent = str(row.get("agent") or row.get("codename") or "agent")
+            vote = str(row.get("vote") or "").upper()
+            role = str(row.get("role") or "")
+            reason = str(row.get("reason") or "")[:80]
+            line = f"  [dim]  {agent} · {vote}"
+            if role:
+                line += f" · {role}"
+            if reason:
+                line += f" — {reason}"
+            console.print(line)
     console.print()
 
 
