@@ -2716,10 +2716,8 @@ def cli(ctx):
     BlockINTQL only receives the address being screened.
     """
     if ctx.invoked_subcommand is None:
-        console.print(BLOCKINTQL_BANNER)
-        click.echo(ctx.get_help())
-        console.print()
-        console.print("[dim]Wallet-based access:[/] [bold]blockintql login --auto-pay --max-payment 0.10[/]")
+        _run_chat_repl(grounded=True)
+        return
 
 @cli.command()
 @click.option("--api-key", required=True)
@@ -3724,7 +3722,7 @@ def query(query, agent, quiet):
 def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=False, quiet=False, grounded=True):
     active_session_id = (session_id or "").strip() or None
     if not quiet and not agent:
-        console.print(Panel("BLOCKINTQL", title="Grok-style chat", border_style="cyan", width=70))
+        console.print(Panel("BLOCKINTQL", title="BlockINTQL Chat", border_style="cyan", width=70))
     while True:
         try:
             raw = console.input("[bold cyan]>[/bold cyan] ").strip()
@@ -3770,7 +3768,11 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
 @click.option("--quiet", "-q", is_flag=True)
 @click.option("--grounded/--no-grounded", default=True, help="BlockINTQL grounded mode")
 def chat(message, session_id, address, chain, interactive, agent, quiet, grounded):
-    """Grok-style multi-turn chat."""
+    """BlockINTQL Chat.
+
+    Run bare (no MESSAGE) or with --interactive to start the REPL.
+    Provide MESSAGE for a single grounded turn.
+    """
     message_text = " ".join(message).strip()
     if interactive or not message_text:
         _run_chat_repl(
