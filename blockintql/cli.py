@@ -3768,9 +3768,12 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
 @click.option("--interactive", "-i", is_flag=True, help="Start multi-turn interactive chat mode.")
 @click.option("--agent", is_flag=True)
 @click.option("--quiet", "-q", is_flag=True)
-def chat(message, session_id, address, chain, interactive, agent, quiet):
+@click.option("--grounded", is_flag=True, help="Use BlockINTQL deterministic grounded mode")
+def chat(message, session_id, address, chain, interactive, agent, quiet, grounded):
     """Scoped multi-turn compliance and blockchain forensics chat."""
     message_text = " ".join(message).strip()
+    if grounded:
+        pass
     if interactive or not message_text:
         _run_chat_repl(
             session_id=session_id,
