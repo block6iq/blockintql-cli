@@ -3739,6 +3739,12 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
         if not raw:
             continue
         lowered = raw.lower()
+        # Helpful hint if user types shell-like commands inside the chat REPL
+        if any(lowered.startswith(p) for p in ("export ", "cd ", "cat ", "ls ", "~/", "./")):
+            console.print("  [yellow]You're inside the BlockINTQL Chat REPL.[/yellow]")
+            console.print("  [dim]Type /exit (or Ctrl+D) to return to your normal shell prompt.[/dim]")
+            console.print("  [dim]Shell commands (export, cat, etc.) are sent as chat messages to the API.[/dim]")
+            continue
         if lowered in {"/exit", "exit", "quit", "/quit"}:
             console.print("  [dim]ended[/dim]")
             return
