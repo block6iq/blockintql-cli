@@ -3583,7 +3583,6 @@ def chat(message, session_id, address, chain, interactive, agent, quiet, grounde
     """Scoped multi-turn compliance and blockchain forensics chat."""
     message_text = " ".join(message).strip()
     if grounded:
-        # route to grounded path if available
         pass
     if interactive or not message_text:
         _run_chat_repl(
