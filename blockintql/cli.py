@@ -3770,7 +3770,12 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
 @click.option("--quiet", "-q", is_flag=True)
 @click.option("--grounded/--no-grounded", default=True, help="BlockINTQL grounded mode")
 def chat(message, session_id, address, chain, interactive, agent, quiet, grounded):
-    """Grok-style multi-turn chat."""
+    """Grok-style multi-turn chat.
+
+    Run bare (no MESSAGE) to start the interactive terminal chat interface
+    (rich box-style like the web terminal, with grounded deterministic responses).
+    Provide MESSAGE for single-turn.
+    """
     message_text = " ".join(message).strip()
     if interactive or not message_text:
         _run_chat_repl(
