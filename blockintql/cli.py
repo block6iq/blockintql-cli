@@ -246,7 +246,32 @@ def get_admin_key():
 
 
 def get_graph_shell_base():
-    return os.environ.get("BLOCKINTQL_GRAPH_SHELL_URL") or load_config().get("graph_shell_url") or GRAPH_SHELL_BASE
+    """Resolve the base URL for the promptable graph web UI (explorer-v2).
+
+    With a local dev server running the new static mount, a bare local setup
+    "just has" the graph UI: if BLOCKINTQL_API_URL points at 127.0.0.1:8000
+    (or localhost:8000) we auto-synthesize http://.../explorer-react/ so that
+    `blockintql graph` (bare), `graph shell "..." --open`, and chat handoffs
+    work without any extra BLOCKINTQL_GRAPH_SHELL_URL.
+    """
+    env_url = os.environ.get("BLOCKINTQL_GRAPH_SHELL_URL")
+    if env_url:
+        return env_url
+    cfg_url = load_config().get("graph_shell_url")
+    if cfg_url:
+        return cfg_url
+    if GRAPH_SHELL_BASE:
+        return GRAPH_SHELL_BASE
+
+    # Auto-discover for local dev server (the mount in the Python server serves the dist here)
+    api_url = os.environ.get("BLOCKINTQL_API_URL", "")
+    if api_url:
+        low = api_url.lower()
+        if "127.0.0.1:8000" in low or "localhost:8000" in low or low.startswith("http://127.0.0.1") or low.startswith("http://localhost"):
+            base = api_url.rstrip("/")
+            return f"{base}/explorer-react/"
+
+    return ""
 
 
 def provider_route_hint(name: str, provider_url: str | None = None) -> str:
@@ -2786,7 +2811,15 @@ def verdict(address_arg, address, chain, context, provider, provider_key, provid
         p_info = f" + {provider} (local)" if provider else ""
         console.print(f"[dim]Screening {address[:20]}...{p_info}[/]")
 
-    # STEP 1: BlockINTQL gets address+chain ONLY
+    # STEP 1: Prefer the open-source deterministic core when we have no (or only local) provider
+    # This is the key to making the OSS repo a real foundation, not just a client.
+    if not provider:
+        from .deterministic import adjudicate
+        result = adjudicate(address, chain=chain)
+        output(result, agent, quiet)
+        return
+
+    # Otherwise fall back to the (optional) BlockINTQL API + local provider enrichment
     result = api_post("/v1/verdict", {"address": address, "chain": chain, "context": context})
 
     # STEP 2: Provider called directly from YOUR machine — key never sent to BlockINTQL
@@ -2834,7 +2867,13 @@ def screen(address_arg, address, chain, provider, provider_key, provider_url, ag
         p_info = f" + {provider} (local)" if provider else ""
         console.print(f"[dim]Screening {address[:20]}...{p_info}[/]")
 
-    # STEP 1: BlockINTQL gets address+chain ONLY
+    # STEP 1: Prefer the open deterministic core for pure local / bring-your-own-data use cases
+    if not provider:
+        from .deterministic import adjudicate
+        result = adjudicate(address, chain=chain)
+        output(result, agent, quiet)
+        return
+
     result = api_post("/v1/screen", {"address": address, "chain": chain})
 
     # STEP 2: Provider called directly from YOUR machine — key never sent to BlockINTQL
@@ -3174,8 +3213,93 @@ def graph(ctx):
         return
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# NEW: First-class deterministic core (the heart of the open source foundation)
+# ──────────────────────────────────────────────────────────────────────────────
+@cli.group()
+def deterministic():
+    """
+    Direct access to the open-source deterministic core.
+
+    This is the auditable, versioned, agent-native reasoning layer.
+    Use it standalone or as the control plane on top of any data sources.
+    """
+
+
+@deterministic.command("adjudicate")
+@click.argument("address")
+@click.option("--chain", default="ethereum")
+@click.option("--json", "json_output", is_flag=True, help="Output raw JSON.")
+@click.option("--labels", default=None, help="Path to JSON own_labels file for bring-your-own-labels (local Sentinel boost).")
+def deterministic_adjudicate(address, chain, json_output, labels):
+    """Run the full deterministic + swarm adjudication locally (no API key required when using DEV_NO_AUTH or local data)."""
+    from .deterministic import adjudicate
+    own_labels = None
+    if labels:
+        with open(labels) as f:
+            own_labels = json.load(f)
+    result = adjudicate(address, chain=chain, own_labels=own_labels)
+    if json_output:
+        click.echo(json.dumps(result, indent=2, default=str))
+    else:
+        output(result)
+
+
+@deterministic.command("export-evidence")
+@click.argument("address")
+@click.option("--chain", default="ethereum")
+@click.option("--out", "outfile", default=None, help="Write bundle to file (json).")
+@click.option("--include-raw", is_flag=True, help="Include raw provider payloads (if any) in the bundle.")
+def deterministic_export_evidence(address, chain, outfile, include_raw):
+    """Export a signed, hashable, reproducible evidence bundle (the artifact regulators actually want)."""
+    from .deterministic import adjudicate, export_evidence_bundle, Policy
+    result = adjudicate(address, chain=chain)
+    prov = result.get("provider_result") or {}
+    if not include_raw:
+        prov = {k: v for k, v in prov.items() if k != "raw"}
+
+    bundle = export_evidence_bundle(
+        subject=address,
+        chain=chain,
+        policy=Policy(),
+        provider_result=prov,
+        consensus=result.get("consensus", {}),
+        final_verdict=result,
+    )
+    data = bundle.to_dict()
+    if outfile:
+        with open(outfile, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        console.print(f"[green]Evidence bundle written → {outfile}[/green]")
+        console.print(f"bundle_hash: {bundle.bundle_hash}")
+        console.print(f"reproducibility_hash: {result.get('_reproducibility_hash')}")
+    else:
+        click.echo(json.dumps(data, indent=2, default=str))
+
+
+@deterministic.command("eval")
+@click.option("--suite", default="synthetic", help="Which suite to run (synthetic for now).")
+@click.option("--ablate", is_flag=True, help="Run provider ablation examples too.")
+def deterministic_eval(suite, ablate):
+    """Run the open evaluation harness against the current deterministic core."""
+    from .eval import run_suite, provider_ablation
+    report = run_suite()
+    console.print(f"[bold]Deterministic eval suite[/bold] — passed {report['passed']}/{report['total']} ({report['accuracy']:.0%})")
+    for r in report["results"]:
+        mark = "✓" if r["match"] else "✗"
+        console.print(f"  {mark} {r['name']}: got {r['verdict']} (expected {r['expected']})")
+    if ablate:
+        ab = provider_ablation(["0xmixer", "0xhighrisk"], [
+            {"entity_category": "mixer"},
+            {"risk_score": 90, "entity_category": "unknown"}
+        ])
+        console.print("[bold]Provider ablation samples:[/bold]")
+        for a in ab["ablations"][:4]:
+            console.print(f"  {a}")
+
+
 @graph.command("shell")
-@click.option("--seed", default=None, help="Seed wallet or address for the shell session.")
+@click.option("--seed", default=None, help="Seed wallet or address (comma-separated for multiple uploaded addresses) for the shell session.")
 @click.option("--open/--no-open", "open_browser", default=False, show_default=True, help="Open the configured explorer URL with the compiled shell spec.")
 @click.option("--json", "json_output", is_flag=True, help="Print structured JSON.")
 @click.argument("prompt")
@@ -3201,7 +3325,7 @@ def graph_shell(prompt, seed, open_browser, json_output):
         )
     if open_browser:
         if not payload.get("explorer_url"):
-            payload["warning"] = "No graph shell URL configured. Set BLOCKINTQL_GRAPH_SHELL_URL or save graph_shell_url in config."
+            payload["warning"] = "No graph explorer URL. Start your local blockintql server (it now auto-mounts /explorer-react/) or set BLOCKINTQL_GRAPH_SHELL_URL / save graph_shell_url."
         else:
             import webbrowser
 
@@ -3271,7 +3395,7 @@ def graph_refine(prompt, seed, open_browser, json_output):
         except Exception:
             payload["opened"] = False
     elif open_browser and not payload.get("explorer_url"):
-        payload["warning"] = "No graph shell URL configured. Set BLOCKINTQL_GRAPH_SHELL_URL or save graph_shell_url in config."
+        payload["warning"] = "No graph explorer URL. Start your local blockintql server (it now auto-mounts /explorer-react/) or set BLOCKINTQL_GRAPH_SHELL_URL / save graph_shell_url."
 
     if json_output:
         click.echo(json.dumps(payload, indent=2, default=str))
@@ -3760,8 +3884,51 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
             payload["session_id"] = active_session_id
         if address:
             payload["address"] = address
+
+        # Always surface the local deterministic layer for OSS value + auditability
+        # This wires the rich chat REPL to the first-class deterministic core.
+        local_blockintql = None
+        if grounded and address:
+            try:
+                from .deterministic import adjudicate, export_evidence_bundle, Policy
+                local_res = adjudicate(address, chain=chain)
+                # Build a minimal evidence bundle for one-click export feel
+                bundle = export_evidence_bundle(
+                    subject=address,
+                    chain=chain,
+                    policy=Policy(),
+                    provider_result={},
+                    consensus=local_res.get("consensus", {}),
+                    final_verdict=local_res,
+                )
+                local_blockintql = {
+                    "verdict": local_res.get("verdict"),
+                    "safe": local_res.get("safe"),
+                    "risk_score": local_res.get("risk_score"),
+                    "risk_indicators": local_res.get("risk_indicators", []),
+                    "entity": local_res.get("entity"),
+                    "consensus": local_res.get("consensus"),
+                    "local_evidence_bundle": bundle.to_dict(),
+                    "one_click_export_note": "Evidence bundle ready for export (use 'blockintql deterministic export-evidence' or copy from chat)",
+                }
+            except Exception:
+                pass  # fall back to server
+
         endpoint = "/v1/blockintql-ask" if grounded else "/v1/chat"
         result = api_post(endpoint, payload, require_auth=True, timeout=120)
+        if local_blockintql and isinstance(result, dict):
+            # Merge local deterministic layer into the grounded result for always-on OSS value
+            result["blockintql"] = local_blockintql.get("verdict") and {
+                "verdict": local_blockintql["verdict"],
+                "safe": local_blockintql["safe"],
+                "risk_score": local_blockintql["risk_score"],
+                "risk_indicators": local_blockintql["risk_indicators"],
+                "entity": local_blockintql.get("entity"),
+            } or result.get("blockintql")
+            result["local_deterministic_consensus"] = local_blockintql.get("consensus")
+            result["local_evidence_bundle"] = local_blockintql.get("local_evidence_bundle")
+            if "narrative" in result:
+                result["narrative"] = (result.get("narrative", "") + "\n\n[LOCAL DETERMINISTIC LAYER] " + str(local_blockintql.get("one_click_export_note", ""))).strip()
         if isinstance(result, dict) and result.get("session_id"):
             active_session_id = result.get("session_id")
         err_text = str((result or {}).get("error") or "") if isinstance(result, dict) else ""
@@ -3770,14 +3937,17 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
             err_console.print("  Quick fixes:")
             err_console.print("    export BLOCKINTQL_API_KEY=biq_sk_live_...")
             err_console.print("    blockintql auth --api-key biq_sk_live_...")
-            err_console.print("  Local dev bypass (recommended for testing this chat):")
+            err_console.print("  Local dev bypass (if you have a dev key configured):")
             err_console.print("    export BLOCKINTQL_API_URL=http://127.0.0.1:8000")
-            err_console.print("    export BLOCKINTQL_API_KEY=biq_sk_live_NN_KYJVZ8-yl0HLWO7xjibKfMXnaUxIQ")
-            err_console.print("    (start the local server with the admin bypass first)")
+            err_console.print("    export BLOCKINTQL_API_KEY=biq_sk_live_... (your dev key)")
+            err_console.print("    (start the local server with admin bypass first)")
             err_console.print("  Or wallet: blockintql login --auto-pay --max-payment 0.10")
             continue
         if grounded and isinstance(result, dict) and result.get("narrative") and isinstance(result.get("blockintql"), dict):
             _render_grounded_chat_box(result)
+            # One-click evidence export hint for the deterministic layer
+            if result.get("local_evidence_bundle"):
+                console.print("  [dim]One-click evidence: run 'blockintql deterministic export-evidence " + (address or "ADDRESS") + " --out evidence.json' or copy the bundle from result[/dim]")
         else:
             output(result, agent, quiet)
 

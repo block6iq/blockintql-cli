@@ -1,0 +1,8 @@
+{
+  "0x7F19720A857F834887FC9A7bC0a0fBe7Fc7f8102": {
+    "entity_category": "mixer",
+    "risk_score": 75,
+    "sanctions_hit": false,
+    "risk_indicators": ["high velocity mixing"]
+  }
+}

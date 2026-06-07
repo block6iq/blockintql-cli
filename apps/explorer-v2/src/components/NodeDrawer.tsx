@@ -18,6 +18,7 @@ type NodeDrawerProps = {
   onSelectAll: (nodeKey: string) => void;
   onClearSelection: (nodeKey: string) => void;
   onPlotSelected: (nodeKey: string) => void;
+  onExportEvidence?: (nodeKey: string) => void;
 };
 
 function transactionKey(row: ExplorerTransaction) {
@@ -176,6 +177,11 @@ export function NodeDrawer({
         <div className="drawer-actions">
           <button className="secondary" type="button" onClick={() => onFocusNode(nodeKey)}>Focus Node</button>
           <button className="secondary" type="button" onClick={() => onExpandCounterparties(nodeKey)}>Expand Counterparties</button>
+          {onExportEvidence && (
+            <button className="primary" type="button" onClick={() => onExportEvidence(nodeKey)}>
+              Export Evidence Bundle (deterministic)
+            </button>
+          )}
         </div>
       </div>
       <div className="drawer-body">

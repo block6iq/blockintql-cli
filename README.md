@@ -1,6 +1,19 @@
-# BlockINTQL CLI
+# BlockINTQL CLI (Open Source)
 
-Blockchain intelligence CLI for screening addresses, tracing funds, searching identities, and calling the BlockINTQL API from scripts or agents.
+**The open control plane and reasoning layer for agentic on-chain compliance.**
+
+BlockINTQL CLI is the leading open-source foundation for building serious, auditable, agent-driven compliance and investigation systems.
+
+It gives you:
+- A first-class, versioned, pure-Python **deterministic screening core** (`blockintql.deterministic`) with an explicit 3-agent swarm (Sentinel / Cypher / Nova).
+- Reproducible **evidence bundles** for audit, SARs, and regulatory defense.
+- A powerful local **graph explorer** (Cytoscape + promptable shells) that works with data you fetch yourself.
+- Proper **MCP server** + tool surface so agents can use the same deterministic contracts humans do.
+- Full support for **bring-your-own-labels / bring-your-own-data** workflows.
+
+The open source project owns the *reasoning layer and control plane*. You can run it against BlockINTQL's hosted data, your own data, other vendors, or completely locally.
+
+The company behind it sells high-quality data, scale, and legal-grade support on top of this open foundation. This is the healthy split.
 
 ## Disclaimer
 
@@ -30,9 +43,15 @@ AI-generated outputs may contain errors. Commands using AI-powered analysis prod
 
 The Service supports optional integration with third-party blockchain analytics providers. If you configure a provider key, the CLI queries that provider directly from your machine. Your provider API key is never transmitted to Block6IQ servers. It is your sole responsibility to confirm that your use of any provider's API via the Service is permitted under your agreement with that provider.
 
-### 6. Open Source Scope
+### 6. Open Source Positioning
 
-The MIT License applies solely to the CLI client software in this repository. It does not extend to the Block6IQ API, intelligence database, risk models, or the BlockINTQL query language and architecture, which are proprietary. Use of the API is governed by the Block6IQ Terms of Service at [blockintql.com/terms](https://blockintql.com/terms).
+This repository is the **open control plane and deterministic reasoning layer** for agentic compliance.
+
+- `blockintql.deterministic`, the swarm, evidence bundles, MCP server, graph explorer, and CLI are all MIT licensed and intended to be used, forked, and implemented by others.
+- The spec (`docs/deterministic-screening-spec-v1.md`) is published so independent implementations can produce compatible `sonar_consensus_v1` output.
+- The company sells high-quality data, hosted scale, and legal-grade support on top of this open foundation.
+
+This is the healthy split we are deliberately building toward.
 
 ### 7. No Warranty; Liability Cap
 
@@ -83,6 +102,26 @@ After updating, you can verify with:
 blockintql --version
 ```
 
+## Quick start — The new foundation experience
+
+```bash
+# 1. Install
+pip install blockintql
+
+# 2. (Optional but recommended for serious work) Run with your own data only
+export BLOCKINTQL_DEV_NO_AUTH=1   # during local development
+
+# 3. Use the deterministic core directly (the real value)
+python -c "
+from blockintql.deterministic import adjudicate, export_evidence_bundle
+result = adjudicate('0x7F19720A857F834887FC9A7bC0a0fBe7Fc7f8102')
+print(result['verdict'], result['risk_score'])
+bundle = export_evidence_bundle(...)
+"
+```
+
+Typing the bare command launches the rich interactive investigation environment (chat + graph orchestration):
+
 ## Quick start (new default experience)
 
 Typing the bare command now launches the interactive chat directly:
@@ -114,7 +153,7 @@ Use the special admin bypass key against a local server (the server must be runn
 
 ```bash
 export BLOCKINTQL_API_URL=http://127.0.0.1:8000
-export BLOCKINTQL_API_KEY=biq_sk_live_NN_KYJVZ8-yl0HLWO7xjibKfMXnaUxIQ
+export BLOCKINTQL_API_KEY=biq_sk_live_YOUR_DEV_KEY   # admin bypass key (only works against a local server started with the matching dev middleware)
 
 # Start the local server (see dev instructions or the blockintql repo)
 # Then in another shell:
@@ -122,6 +161,19 @@ blockintql
 # Paste the recommended prompt above. You should get a grounded CAUTION response
 # with risk score, citations, and 0 credits charged.
 ```
+
+**Temporary dev convenience (recommended while iterating locally):**
+```bash
+export BLOCKINTQL_API_URL=http://127.0.0.1:8000
+export BLOCKINTQL_DEV_NO_AUTH=1   # server will accept requests with no API key at all (admin bypass)
+```
+This lets you run `blockintql`, `blockintql verdict ...`, chat prompts, graph commands, etc. without constantly exporting the long admin key. Revert by unsetting the var before any public-facing work.
+
+The graph web UI (explorer-v2) is now automatically mounted by the same local server at the same origin:
+
+http://127.0.0.1:8000/explorer-react/
+
+CLI graph commands (bare `blockintql graph`, `graph shell "prompt" --seed 0x... --open`, etc.) auto-discover it when `BLOCKINTQL_API_URL` points at your local server. You can upload/paste seed addresses directly in the toolbar, apply natural-language shell prompts via the Prompt Studio, and drive the Cytoscape canvas from the evidence drawer. No separate dev server for the explorer is required.
 
 See `blockintql --help` for the full Live Now (V1) command list (chat is now the primary entry point).
 

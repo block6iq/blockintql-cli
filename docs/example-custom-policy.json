@@ -1,0 +1,11 @@
+{
+  "version": "policy-v1",
+  "name": "my-org-strict-aml-v2",
+  "rules": [
+    { "category": "exchange", "verdict": "CAUTION", "severity": "medium" },
+    { "category": "defi", "verdict": "REVIEW", "severity": "low" },
+    { "category": "mixer", "verdict": "BLOCK", "severity": "critical" }
+  ],
+  "sanctions_override": true,
+  "conservative_unknown": true
+}

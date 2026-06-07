@@ -38,6 +38,7 @@ export function App() {
     clearTransactionSelection,
     plotSelectedTransactions,
     expandCounterparties,
+    uploadSeeds,
     traceTransaction,
     shellPrompt,
     shellSpec,
@@ -48,7 +49,16 @@ export function App() {
     openTransactionCounterparty,
     setShellPrompt,
     applyShellPrompt,
+    exportEvidence,
+    saveWorkspace,
+    loadWorkspace: loadWsFromStore,
+    getTimeline,
   } = useExplorerStore();
+
+  // Expose for ControlBar buttons (standalone explorer-v2)
+  (window as any).explorerSaveWorkspace = saveWorkspace;
+  (window as any).explorerLoadWorkspace = (json: string) => loadWsFromStore(json);
+  (window as any).explorerGetTimeline = getTimeline;
 
   const details = useMemo(() => nodeDetails[selectedNodeKey] || null, [nodeDetails, selectedNodeKey]);
   const selectedRows = selectedTransactionKeys[selectedNodeKey] ?? [];
@@ -77,6 +87,7 @@ export function App() {
         onClear={clearWorkspace}
         onAddressHistory={runAddressHistory}
         onHydrate={hydrateGraph}
+        onUploadSeeds={uploadSeeds}
       />
 
       <section className="workspace">
@@ -107,6 +118,7 @@ export function App() {
           onSelectAll={selectAllTransactions}
           onClearSelection={clearTransactionSelection}
           onPlotSelected={plotSelectedTransactions}
+          onExportEvidence={exportEvidence}
         />
       </section>
 
