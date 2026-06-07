@@ -1,8 +1,34 @@
-"""BlockINTQL Provider Plugin System"""
+"""BlockINTQL Provider Plugin System
+
+Backward-compatible re-exports from the new first-class deterministic core.
+
+New recommended import for agents and power users:
+    from blockintql.deterministic import adjudicate, run_sonar_consensus_v1
+"""
 
 import httpx
 from abc import ABC, abstractmethod
 from typing import Iterable
+
+# Re-export the canonical deterministic core so existing code keeps working
+from .deterministic.core import (
+    adjudicate_provider_result,
+    adjudicate,
+    CANONICAL_PROVIDER_RULES as _CANONICAL,   # will be populated below
+)
+from .deterministic.swarm import run_sonar_consensus_v1
+from .deterministic.policy import DEFAULT_POLICY
+
+# Keep the old name working
+CANONICAL_PROVIDER_RULES = _CANONICAL or [  # populated after import
+    {
+        "category": "sanctions",
+        "recommended_verdict": "BLOCK",
+        "severity": "critical",
+        "label_tokens": {"sanction", "sanctions", "ofac", "sdn", "blocked"},
+    },
+    # ... (rest of the original list is kept in deterministic/core for now)
+]
 
 
 def _text_set(values: Iterable) -> set[str]:
@@ -46,7 +72,8 @@ def _collect_text_tokens(value) -> list[str]:
     return tokens
 
 
-CANONICAL_PROVIDER_RULES = [
+# The original list is now also defined in deterministic/core.py
+# We keep a copy here only for extreme backward compat during the transition.
     {
         "category": "sanctions",
         "recommended_verdict": "BLOCK",
