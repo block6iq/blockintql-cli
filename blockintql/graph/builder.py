@@ -185,3 +185,59 @@ class GraphBuilder:
             "unique_counterparties": len(counterparties),
             "counterparties": list(counterparties)[:10]
         }
+
+    def compute_betweenness_centrality(self, sample_k: int = 10) -> Dict[str, float]:
+        """Lightweight approximate betweenness centrality (production-grade local algo, no networkx dep)."""
+        from collections import defaultdict
+        centrality: Dict[str, float] = defaultdict(float)
+        nodes = [n["id"] for n in self.nodes]
+        if not nodes:
+            return {}
+        import random
+        sample = random.sample(nodes, min(sample_k, len(nodes)))
+        for s in sample:
+            # BFS shortest paths count (Brandes approx)
+            stack = []
+            pred: Dict[str, List[str]] = {w: [] for w in nodes}
+            sigma: Dict[str, float] = {w: 0.0 for w in nodes}; sigma[s] = 1.0
+            dist: Dict[str, int] = {w: -1 for w in nodes}; dist[s] = 0
+            queue = [s]
+            while queue:
+                v = queue.pop(0)
+                stack.append(v)
+                for link in self.links:
+                    w = link["target"] if link["source"] == v else (link["source"] if link["target"] == v else None)
+                    if w and dist[w] < 0:
+                        queue.append(w)
+                        dist[w] = dist[v] + 1
+                    if w and dist[w] == dist[v] + 1:
+                        sigma[w] += sigma[v]
+                        pred[w].append(v)
+            delta: Dict[str, float] = {w: 0.0 for w in nodes}
+            while stack:
+                w = stack.pop()
+                for v in pred[w]:
+                    delta[v] += (sigma[v] / sigma[w]) * (1 + delta[w]) if sigma[w] > 0 else 0
+                if w != s:
+                    centrality[w] += delta[w]
+        # normalize
+        max_c = max(centrality.values()) or 1.0
+        return {k: v / max_c for k, v in centrality.items()}
+
+    def compute_pagerank(self, damping: float = 0.85, iterations: int = 20) -> Dict[str, float]:
+        """Lightweight PageRank simulation (production-grade local, pure Python)."""
+        from collections import defaultdict
+        nodes = [n["id"] for n in self.nodes]
+        if not nodes:
+            return {}
+        n = len(nodes)
+        rank = {node: 1.0 / n for node in nodes}
+        for _ in range(iterations):
+            new_rank = {node: (1 - damping) / n for node in nodes}
+            for link in self.links:
+                src, tgt = link["source"], link["target"]
+                out_degree = sum(1 for l in self.links if l["source"] == src) or 1
+                new_rank[tgt] += damping * rank[src] / out_degree
+            rank = new_rank
+        s = sum(rank.values()) or 1.0
+        return {k: v / s for k, v in rank.items()}

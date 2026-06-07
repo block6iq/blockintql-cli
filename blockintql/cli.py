@@ -10,6 +10,8 @@ PRIVACY ARCHITECTURE:
 Verify this by reading the source. Open source: github.com/block6iq/blockintql-cli
 """
 
+from __future__ import annotations
+
 import sys, os, json, base64, tempfile, time, shutil, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3885,14 +3887,17 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
         if address:
             payload["address"] = address
 
-        # Always surface the local deterministic layer for OSS value + auditability
-        # This wires the rich chat REPL to the first-class deterministic core.
-        local_blockintql = None
-        if grounded and address:
+        # Full local REPL default: prefer the OSS deterministic core for grounded when no key or local/dev mode
+        # This makes bare `blockintql` fully usable locally without server/key for the core compliance layer.
+        api_key = get_api_key()
+        api_url = os.environ.get("BLOCKINTQL_API_URL", DEFAULT_API_BASE)
+        is_local_dev = bool(os.environ.get("BLOCKINTQL_DEV_NO_AUTH")) or "127.0.0.1" in api_url or "localhost" in api_url
+        use_local = grounded and (not api_key or is_local_dev)
+
+        if use_local and address:
             try:
                 from .deterministic import adjudicate, export_evidence_bundle, Policy
                 local_res = adjudicate(address, chain=chain)
-                # Build a minimal evidence bundle for one-click export feel
                 bundle = export_evidence_bundle(
                     subject=address,
                     chain=chain,
@@ -3901,34 +3906,31 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
                     consensus=local_res.get("consensus", {}),
                     final_verdict=local_res,
                 )
-                local_blockintql = {
-                    "verdict": local_res.get("verdict"),
-                    "safe": local_res.get("safe"),
-                    "risk_score": local_res.get("risk_score"),
-                    "risk_indicators": local_res.get("risk_indicators", []),
-                    "entity": local_res.get("entity"),
+                # Build full grounded response locally (narrative stub + deterministic)
+                narrative = f"[GROUNDED] Screened {address} on {chain}. Verdict {local_res.get('verdict')} (risk {local_res.get('risk_score')}/100) from 3-agent swarm. Using local deterministic core (no server roundtrip in this mode)."
+                result = {
+                    "narrative": narrative,
+                    "blockintql": {
+                        "verdict": local_res.get("verdict"),
+                        "safe": local_res.get("safe"),
+                        "risk_score": local_res.get("risk_score"),
+                        "risk_indicators": local_res.get("risk_indicators", []),
+                        "entity": local_res.get("entity"),
+                    },
                     "consensus": local_res.get("consensus"),
                     "local_evidence_bundle": bundle.to_dict(),
-                    "one_click_export_note": "Evidence bundle ready for export (use 'blockintql deterministic export-evidence' or copy from chat)",
+                    "citations": ["Sentinel: sanctions and label intelligence (local)", "Cypher: FIFO source-of-funds (local)", "Nova: patterns/hops (local)"],
+                    "cost": {"credits_charged": 0, "model": "local-deterministic"},
+                    "session_id": active_session_id or "local-only",
                 }
-            except Exception:
-                pass  # fall back to server
+                _render_grounded_chat_box(result)
+                continue  # handled locally, no API call
+            except Exception as e:
+                err_console.print(f"  [yellow]Local deterministic fallback failed ({e}), trying server...[/yellow]")
 
+        # Fallback to server path (existing)
         endpoint = "/v1/blockintql-ask" if grounded else "/v1/chat"
         result = api_post(endpoint, payload, require_auth=True, timeout=120)
-        if local_blockintql and isinstance(result, dict):
-            # Merge local deterministic layer into the grounded result for always-on OSS value
-            result["blockintql"] = local_blockintql.get("verdict") and {
-                "verdict": local_blockintql["verdict"],
-                "safe": local_blockintql["safe"],
-                "risk_score": local_blockintql["risk_score"],
-                "risk_indicators": local_blockintql["risk_indicators"],
-                "entity": local_blockintql.get("entity"),
-            } or result.get("blockintql")
-            result["local_deterministic_consensus"] = local_blockintql.get("consensus")
-            result["local_evidence_bundle"] = local_blockintql.get("local_evidence_bundle")
-            if "narrative" in result:
-                result["narrative"] = (result.get("narrative", "") + "\n\n[LOCAL DETERMINISTIC LAYER] " + str(local_blockintql.get("one_click_export_note", ""))).strip()
         if isinstance(result, dict) and result.get("session_id"):
             active_session_id = result.get("session_id")
         err_text = str((result or {}).get("error") or "") if isinstance(result, dict) else ""

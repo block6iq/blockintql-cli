@@ -28,12 +28,22 @@ PUBLIC_TEST_FIXTURE = [
     {"address": "0x0000000000000000000000000000000000000000", "provider": {"sanctions_hit": True}, "expected": "BLOCK", "rationale": "Direct sanctions per spec §5.1"},
     {"address": "0x1111111111111111111111111111111111111111", "provider": {"risk_score": 95, "entity_category": "unknown"}, "expected": "CAUTION", "rationale": "Unmapped high risk per spec §5.2"},
     {"address": "0x2222222222222222222222222222222222222222", "provider": {"entity_category": "exchange"}, "expected": "CLEAR", "rationale": "Low risk canonical per rules"},
+    {"address": "0x3333333333333333333333333333333333333333", "provider": {"entity_category": "mixer", "risk_score": 60}, "expected": "CAUTION", "rationale": "Mixer label per rules"},
+    {"address": "0x4444444444444444444444444444444444444444", "provider": {"risk_score": 30}, "expected": "CLEAR", "rationale": "Low risk unmapped"},
 ]
 
 SYNTHETIC_CASES.extend([
     {"name": f"public_fixture_{i}", "address": case["address"], "provider": case["provider"], "expect": case["expected"]} 
     for i, case in enumerate(PUBLIC_TEST_FIXTURE)
 ])
+
+# More fixtures for ablation / edge cases
+MORE_EVAL_FIXTURES = [
+    {"name": "high_risk_scam", "address": "0xscamhigh", "provider": {"risk_score": 88, "entity_category": "scam"}, "expect": "BLOCK"},
+    {"name": "defi_low", "address": "0xdefi", "provider": {"entity_category": "defi", "risk_score": 15}, "expect": "CLEAR"},
+    {"name": "ransomware", "address": "0xransom", "provider": {"entity_category": "ransomware"}, "expect": "BLOCK"},
+]
+
 
 
 def run_case(case: Dict[str, Any]) -> Dict[str, Any]:
