@@ -44,17 +44,45 @@ MORE_EVAL_FIXTURES = [
     {"name": "ransomware", "address": "0xransom", "provider": {"entity_category": "ransomware"}, "expect": "BLOCK"},
 ]
 
+# Load additional fixtures from JSON for production-grade testing
+import json
+import os
+FIXTURES_PATH = os.path.join(os.path.dirname(__file__), "fixtures.json")
+try:
+    with open(FIXTURES_PATH) as f:
+        JSON_FIXTURES = json.load(f)
+    for fix in JSON_FIXTURES:
+        SYNTHETIC_CASES.append({
+            "name": fix["name"],
+            "address": fix["address"],
+            "provider": fix.get("provider_result", {}),
+            "local_flow_data": fix.get("local_flow_data"),
+            "local_graph_data": fix.get("local_graph_data"),
+            "own_labels": fix.get("own_labels"),
+            "expect": fix.get("expected", {}).get("verdict", "CLEAR")
+        })
+except Exception:
+    JSON_FIXTURES = []
+
 
 
 def run_case(case: Dict[str, Any]) -> Dict[str, Any]:
-    res = adjudicate(case["address"], provider_result=case.get("provider"), policy=case.get("policy"))
+    res = adjudicate(
+        case["address"],
+        chain=case.get("chain", "ethereum"),
+        provider_result=case.get("provider"),
+        policy=case.get("policy"),
+        local_flow_data=case.get("local_flow_data"),
+        local_graph_data=case.get("local_graph_data"),
+        own_labels=case.get("own_labels"),
+    )
     return {
         "name": case["name"],
         "verdict": res["verdict"],
         "risk_score": res["risk_score"],
         "expected": case.get("expect"),
         "match": res["verdict"] == case.get("expect"),
-        "swarm": {v["agent"]: v["vote"] for v in res["consensus"]["votes"]},
+        "swarm": {v["agent"]: v["vote"] for v in (res.get("consensus") or {}).get("votes", [])},
     }
 
 

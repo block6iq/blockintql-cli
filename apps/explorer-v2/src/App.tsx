@@ -130,6 +130,13 @@ export function App() {
         onFocusStep={focusStep}
       />
 
+      {/* Deeper explorer timeline UI (next wave) - standalone OSS value, with evidence export integration and local deterministic tie-in */}
+      <Timeline 
+        events={getTimeline()} 
+        onFocusNode={setSelectedNodeKey} 
+        onExportEvidence={exportEvidence} 
+      />
+      {/* Note: timeline events can trigger local deterministic via the builder's run_local_deterministic_on_subgraph for production-grade local analysis */}
       {/* Deeper explorer timeline UI (next wave) - standalone OSS value */}
       <Timeline events={getTimeline()} onFocusNode={setSelectedNodeKey} />
 

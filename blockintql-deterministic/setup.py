@@ -2,6 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="blockintql-deterministic",
+    version="0.1.1",
     version="0.1.0",
     packages=find_packages(),
     package_data={"blockintql_deterministic": ["py.typed"]},

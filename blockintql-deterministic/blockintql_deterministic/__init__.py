@@ -39,6 +39,7 @@ from .evidence import (
     verify_evidence_bundle,
 )
 
+__version__ = "0.1.1"
 __version__ = "0.1.0"
 __all__ = [
     "adjudicate",

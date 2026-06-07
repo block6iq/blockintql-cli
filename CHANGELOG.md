@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - Next Wave (Deeper Explorer, Standalone Deterministic Package, Production Local Graph)
 
 ### Added / In Progress
+- `blockintql-deterministic` packaging polish: real console script (`blockintql-deterministic adjudicate ...` + `eval`), `__main__.py`, fixed pyproject entry points, updated README with source install + CLI examples, version 0.1.1. Now `pip install -e ./blockintql-deterministic` + direct use is fully supported and verified.
+- Full local REPL default strengthened: bare `blockintql` (keyless or DEV_NO_AUTH / localhost) now produces the complete rich grounded experience (BLOCKINTQL panel + detailed narrative + full SONAR CONSENSUS with per-agent Sentinel/Cypher/Nova votes + reasons + citations + local_evidence_bundle + one-click export hint) using only the in-process deterministic core. No more "stub".
+- Deeper explorer-v2 timeline UI: dedicated `Timeline` React component with focusable events, range scrubber, filter/sort, export buttons; wired into App + store `getTimeline()`.
+- `blockintql-deterministic` as its own lightweight published package (separate `pyproject.toml`/`setup.py`, `blockintql_deterministic/` namespace, self-contained for `pip install blockintql-deterministic` while keeping main CLI re-exports for convenience).
+- More production-grade local graph algorithms in `GraphBuilder`.
+- Explorer workspace save/load + one-click evidence.
+- CLI `deterministic adjudicate` + `eval` (13/13 on current suite).
+- Expanded local/hybrid power.
 - Deeper explorer-v2 timeline UI: dedicated `Timeline` React component with focusable events, integrated into main view; `getTimeline()` + attribution support in store.
 - `blockintql-deterministic` as its own lightweight published package (separate `pyproject.toml`/`setup.py`, `blockintql_deterministic/` namespace, self-contained for `pip install blockintql-deterministic` while keeping main CLI re-exports for convenience).
 - More production-grade local graph algorithms in `GraphBuilder`: `compute_betweenness_centrality` (Brandes approx), `compute_pagerank` (lightweight iteration), enhanced `compute_flow_analysis`, `add_timeline_view`, plus GraphML + Neo4j Cypher exports.

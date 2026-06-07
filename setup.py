@@ -26,6 +26,10 @@ setup(
         "rich>=13.0.0",
         "x402[httpx]>=2.7.0; python_version>='3.10'",
         "eth_account>=0.13.0; python_version>='3.10'",
+        # The deterministic core is also available as a lightweight standalone package:
+        #   pip install blockintql-deterministic
+        # It provides the library, swarm, evidence, MCP tools, and local graph algos
+        # without the full CLI. The main blockintql package re-exports for convenience.
     ],
     entry_points={
         "console_scripts": [

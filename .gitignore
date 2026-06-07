@@ -7,3 +7,5 @@ build/
 *.egg
 integrations/javascript/*.tgz
 .env
+apps/explorer-v2/node_modules/
+apps/explorer-v2/node_modules/

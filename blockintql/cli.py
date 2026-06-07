@@ -12,12 +12,22 @@ Verify this by reading the source. Open source: github.com/block6iq/blockintql-c
 
 from __future__ import annotations
 
+import sys, os, json, base64, tempfile, time, shutil, subprocess, re
 import sys, os, json, base64, tempfile, time, shutil, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 import click
 import httpx
+
+# Simple address extractor for chat REPL lines so local deterministic works on bare "0x..." or "Screen 0x..." input
+_ADDR_RE = re.compile(r'(0x[a-fA-F0-9]{40}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})')
+
+def _extract_address_from_text(text: str) -> str | None:
+    if not text:
+        return None
+    m = _ADDR_RE.search(text)
+    return m.group(1) if m else None
 from rich.console import Console
 from rich.table import Table
 from rich import box
@@ -2748,11 +2758,12 @@ def cli(ctx):
         console.print(BLOCKINTQL_BANNER)
         console.print()
         console.print("[dim]Defaulting to interactive BlockINTQL Chat (grounded).[/dim]")
-        console.print("[dim]Requires an API key (or wallet via `login`). Set BLOCKINTQL_API_KEY or run `blockintql auth`.[/dim]")
-        console.print("[dim]Other commands: screen, verdict, history, status, providers, chart, graph, ... (see --help).[/dim]")
+        console.print("[dim]Uses the local deterministic core (Sentinel / Cypher FIFO / Nova) by default when no API key or in dev mode.[/dim]")
+        console.print("[dim]Set BLOCKINTQL_API_KEY or run `blockintql auth` for hosted provider data + scale.[/dim]")
+        console.print("[dim]Commands: screen, verdict, chat, graph, deterministic, chart, ... (see --help).[/dim]")
         console.print()
         console.print("[bold]Try this first prompt:[/bold]")
-        console.print("  Screen 0x742d35Cc6634C0532925a3b844Bc9e7595f6EEd0 and create a chart for the last 30 days.")
+        console.print("  0x742d35Cc6634C0532925a3b844Bc9e7595f6EEd0")
         console.print()
         _run_chat_repl(grounded=True)
         return
@@ -3289,15 +3300,22 @@ def deterministic_eval(suite, ablate):
     console.print(f"[bold]Deterministic eval suite[/bold] — passed {report['passed']}/{report['total']} ({report['accuracy']:.0%})")
     for r in report["results"]:
         mark = "✓" if r["match"] else "✗"
-        console.print(f"  {mark} {r['name']}: got {r['verdict']} (expected {r['expected']})")
+        swarm = r.get("swarm") or {}
+        swarm_str = "  ".join(f"{k}:{v}" for k, v in swarm.items()) if swarm else ""
+        console.print(f"  {mark} {r['name']}: got {r['verdict']} (expected {r['expected']})" + (f"  [{swarm_str}]" if swarm_str else ""))
     if ablate:
-        ab = provider_ablation(["0xmixer", "0xhighrisk"], [
-            {"entity_category": "mixer"},
-            {"risk_score": 90, "entity_category": "unknown"}
-        ])
-        console.print("[bold]Provider ablation samples:[/bold]")
-        for a in ab["ablations"][:4]:
-            console.print(f"  {a}")
+        ab = provider_ablation(
+            ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "0xcccccccccccccccccccccccccccccccccccccccc"],
+            [
+                {"entity_category": "mixer"},
+                {"risk_score": 90, "entity_category": "unknown"},
+                {"entity_category": "exchange", "risk_score": 8},
+            ]
+        )
+        console.print("[bold]Provider ablation samples (more depth):[/bold]")
+        for a in ab.get("ablations", [])[:9]:
+            console.print(f"  provider={a.get('provider')} addr={a.get('address')[:10]}... → {a.get('verdict')} risk={a.get('risk')}")
+        console.print("[dim]Tip: add real provider outputs + local_flow_data / local_graph_data cases for full trace ablation.[/dim]")
 
 
 @graph.command("shell")
@@ -3850,11 +3868,14 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
     active_session_id = (session_id or "").strip() or None
     if not quiet and not agent:
         console.print(Panel("BLOCKINTQL", title="BlockINTQL Chat", border_style="cyan", width=70))
-        if not get_api_key() and not _wallet_ready_for_requests():
-            console.print("[dim]No API key configured. Set BLOCKINTQL_API_KEY or run `blockintql auth --api-key ...`[/dim]")
-            console.print("[dim]For local dev testing (free, no credits): export BLOCKINTQL_API_URL=http://127.0.0.1:8000 + the admin key[/dim]")
-            console.print("[dim]Wallet mode: blockintql login --auto-pay[/dim]")
-            console.print()
+        api_key_present = bool(get_api_key()) or _wallet_ready_for_requests()
+        is_local = bool(os.environ.get("BLOCKINTQL_DEV_NO_AUTH")) or "localhost" in os.environ.get("BLOCKINTQL_API_URL", "") or "127.0.0.1" in os.environ.get("BLOCKINTQL_API_URL", "")
+        if is_local or not api_key_present:
+            console.print("[dim]Local deterministic mode active (3-agent swarm runs in-process). Rich SONAR CONSENSUS + evidence bundles on every grounded turn.[/dim]")
+            console.print("[dim]For hosted providers set BLOCKINTQL_API_KEY (or BLOCKINTQL_API_URL + key for local server).[/dim]")
+        else:
+            console.print("[dim]Using hosted path with your API key.[/dim]")
+        console.print()
     while True:
         try:
             raw = console.input("[bold cyan]>[/bold cyan] ").strip()
@@ -3884,9 +3905,15 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
         payload = {"message": raw, "chain": chain, "grounded": grounded}
         if active_session_id:
             payload["session_id"] = active_session_id
-        if address:
-            payload["address"] = address
 
+        # Per-turn address extraction so bare REPL lines like "0x..." or "Screen 0xabc..." or txid trigger local deterministic.
+        turn_address = address or _extract_address_from_text(raw)
+        if turn_address:
+            payload["address"] = turn_address
+
+        # Full local REPL default: if no API key (or local dev), default to pure local deterministic core for grounded responses.
+        # This makes bare `blockintql` (or chat) a full local-first REPL using the OSS library by default.
+        # Users can still force server with BLOCKINTQL_API_KEY or unset DEV_NO_AUTH.
         # Full local REPL default: prefer the OSS deterministic core for grounded when no key or local/dev mode
         # This makes bare `blockintql` fully usable locally without server/key for the core compliance layer.
         api_key = get_api_key()
@@ -3894,18 +3921,40 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
         is_local_dev = bool(os.environ.get("BLOCKINTQL_DEV_NO_AUTH")) or "127.0.0.1" in api_url or "localhost" in api_url
         use_local = grounded and (not api_key or is_local_dev)
 
+        if use_local and turn_address:
+            try:
+                from .deterministic import adjudicate, export_evidence_bundle, Policy
+                local_res = adjudicate(turn_address, chain=chain)
         if use_local and address:
             try:
                 from .deterministic import adjudicate, export_evidence_bundle, Policy
                 local_res = adjudicate(address, chain=chain)
                 bundle = export_evidence_bundle(
-                    subject=address,
+                    subject=turn_address,
                     chain=chain,
                     policy=Policy(),
                     provider_result={},
                     consensus=local_res.get("consensus", {}),
                     final_verdict=local_res,
                 )
+                # Full local deterministic path (rich grounded experience, no server required).
+                # This is the default when no BLOCKINTQL_API_KEY or when using DEV_NO_AUTH / localhost.
+                # Produces the same SONAR CONSENSUS panels the server path renders.
+                verdict = local_res.get("verdict")
+                risk = local_res.get("risk_score")
+                narrative = (
+                    f"[GROUNDED] Local deterministic screen of {turn_address} on {chain}. "
+                    f"Verdict {verdict} (risk {risk}/100) via 3-agent sonar_consensus_v1 "
+                    f"(Sentinel sanctions/labels, Cypher real FIFO lot accounting, Nova hops/velocity/patterns). "
+                    "Pure local core — zero central API roundtrip."
+                )
+                result = {
+                    "narrative": narrative,
+                    "blockintql": {
+                        "verdict": verdict,
+                        "safe": local_res.get("safe"),
+                        "risk_score": risk,
+                        "risk_indicators": local_res.get("risk_indicators", []) or (local_res.get("consensus") or {}).get("risk_indicators", []),
                 # Build full grounded response locally (narrative stub + deterministic)
                 narrative = f"[GROUNDED] Screened {address} on {chain}. Verdict {local_res.get('verdict')} (risk {local_res.get('risk_score')}/100) from 3-agent swarm. Using local deterministic core (no server roundtrip in this mode)."
                 result = {
@@ -3919,11 +3968,19 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
                     },
                     "consensus": local_res.get("consensus"),
                     "local_evidence_bundle": bundle.to_dict(),
+                    "citations": [
+                        "Sentinel: sanctions + labels (local)",
+                        "Cypher: deterministic FIFO source-of-funds per spec §5.4 (local)",
+                        "Nova: structural patterns / hops / velocity (local)",
+                    ],
                     "citations": ["Sentinel: sanctions and label intelligence (local)", "Cypher: FIFO source-of-funds (local)", "Nova: patterns/hops (local)"],
                     "cost": {"credits_charged": 0, "model": "local-deterministic"},
                     "session_id": active_session_id or "local-only",
                 }
                 _render_grounded_chat_box(result)
+                # One-click evidence always available in local mode (the audit artifact users asked for)
+                console.print("  [dim]Evidence bundle ready: blockintql deterministic export-evidence " + turn_address + " --out evidence.json[/dim]")
+                console.print("  [dim]Or copy from result['local_evidence_bundle'] for programmatic use.[/dim]")
                 continue  # handled locally, no API call
             except Exception as e:
                 err_console.print(f"  [yellow]Local deterministic fallback failed ({e}), trying server...[/yellow]")
@@ -3985,8 +4042,42 @@ def chat(message, session_id, address, chain, interactive, agent, quiet, grounde
     payload = {"message": message_text, "chain": chain, "grounded": grounded}
     if session_id:
         payload["session_id"] = session_id
-    if address:
-        payload["address"] = address
+
+    # One-shot chat local fallback (so `blockintql chat "0x..." --grounded` also works with DEV_NO_AUTH / no key, just like the interactive REPL)
+    turn_address = address or _extract_address_from_text(message_text)
+    if turn_address:
+        payload["address"] = turn_address
+
+    api_key = get_api_key()
+    api_url = os.environ.get("BLOCKINTQL_API_URL", DEFAULT_API_BASE)
+    is_local_dev = bool(os.environ.get("BLOCKINTQL_DEV_NO_AUTH")) or "127.0.0.1" in api_url or "localhost" in api_url
+    use_local = grounded and (not api_key or is_local_dev)
+
+    if use_local and turn_address:
+        try:
+            from .deterministic import adjudicate, export_evidence_bundle, Policy
+            local_res = adjudicate(turn_address, chain=chain)
+            bundle = export_evidence_bundle(subject=turn_address, chain=chain, policy=Policy(), provider_result={}, consensus=local_res.get("consensus", {}), final_verdict=local_res)
+            verdict = local_res.get("verdict")
+            risk = local_res.get("risk_score")
+            narrative = f"[GROUNDED] Local deterministic screen of {turn_address} on {chain}. Verdict {verdict} (risk {risk}/100) via 3-agent sonar_consensus_v1 (Sentinel / Cypher / Nova). Pure local core."
+            result = {
+                "narrative": narrative,
+                "blockintql": {"verdict": verdict, "safe": local_res.get("safe"), "risk_score": risk},
+                "consensus": local_res.get("consensus"),
+                "local_evidence_bundle": bundle.to_dict(),
+                "citations": ["Sentinel (local)", "Cypher (local)", "Nova (local)"],
+                "cost": {"credits_charged": 0, "model": "local-deterministic"},
+            }
+            if not quiet:
+                _render_grounded_chat_box(result)
+                console.print("  [dim]Evidence bundle ready: blockintql deterministic export-evidence " + turn_address + " --out evidence.json[/dim]")
+            else:
+                output(result, agent, quiet)
+            return
+        except Exception as e:
+            err_console.print(f"  [yellow]Local deterministic fallback failed ({e}), trying server...[/yellow]")
+
     endpoint = "/v1/blockintql-ask" if grounded else "/v1/chat"
     result = api_post(endpoint, payload, require_auth=True, timeout=120)
     output(result, agent, quiet)

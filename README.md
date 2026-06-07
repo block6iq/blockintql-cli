@@ -10,6 +10,8 @@ It gives you:
 - A powerful local **graph explorer** (Cytoscape + promptable shells, saved workspaces, timeline/attribution, one-click evidence export) that works with data you fetch yourself.
 - Proper **MCP server** + tool surface (with guardrails/HIL) so agents can use the same deterministic contracts humans do.
 - Full support for **bring-your-own-labels / bring-your-own-data** workflows.
+- Production-grade local graph algorithms (taint, communities, flow, betweenness, pagerank, modularity, GraphML/Neo4j exports, local deterministic on subgraphs, etc.).
+- Full local REPL default for chat when no key is set (uses the deterministic core directly).
 - Production-grade local graph algorithms (taint, communities, flow, betweenness, pagerank, GraphML/Neo4j exports, etc.).
 
 The open source project owns the *reasoning layer and control plane*. You can run it against BlockINTQL's hosted data, your own data, other vendors, or completely locally.
