@@ -28,6 +28,8 @@ PUBLIC_TEST_FIXTURE = [
     {"address": "0x0000000000000000000000000000000000000000", "provider": {"sanctions_hit": True}, "expected": "BLOCK", "rationale": "Direct sanctions per spec §5.1"},
     {"address": "0x1111111111111111111111111111111111111111", "provider": {"risk_score": 95, "entity_category": "unknown"}, "expected": "CAUTION", "rationale": "Unmapped high risk per spec §5.2"},
     {"address": "0x2222222222222222222222222222222222222222", "provider": {"entity_category": "exchange"}, "expected": "CLEAR", "rationale": "Low risk canonical per rules"},
+    {"address": "0x3333333333333333333333333333333333333333", "provider": {"entity_category": "mixer", "risk_score": 60}, "expected": "CAUTION", "rationale": "Mixer label per rules"},
+    {"address": "0x4444444444444444444444444444444444444444", "provider": {"risk_score": 30}, "expected": "CLEAR", "rationale": "Low risk unmapped"},
 ]
 
 SYNTHETIC_CASES.extend([
@@ -35,16 +37,52 @@ SYNTHETIC_CASES.extend([
     for i, case in enumerate(PUBLIC_TEST_FIXTURE)
 ])
 
+# More fixtures for ablation / edge cases
+MORE_EVAL_FIXTURES = [
+    {"name": "high_risk_scam", "address": "0xscamhigh", "provider": {"risk_score": 88, "entity_category": "scam"}, "expect": "BLOCK"},
+    {"name": "defi_low", "address": "0xdefi", "provider": {"entity_category": "defi", "risk_score": 15}, "expect": "CLEAR"},
+    {"name": "ransomware", "address": "0xransom", "provider": {"entity_category": "ransomware"}, "expect": "BLOCK"},
+]
+
+# Load additional fixtures from JSON for production-grade testing
+import json
+import os
+FIXTURES_PATH = os.path.join(os.path.dirname(__file__), "fixtures.json")
+try:
+    with open(FIXTURES_PATH) as f:
+        JSON_FIXTURES = json.load(f)
+    for fix in JSON_FIXTURES:
+        SYNTHETIC_CASES.append({
+            "name": fix["name"],
+            "address": fix["address"],
+            "provider": fix.get("provider_result", {}),
+            "local_flow_data": fix.get("local_flow_data"),
+            "local_graph_data": fix.get("local_graph_data"),
+            "own_labels": fix.get("own_labels"),
+            "expect": fix.get("expected", {}).get("verdict", "CLEAR")
+        })
+except Exception:
+    JSON_FIXTURES = []
+
+
 
 def run_case(case: Dict[str, Any]) -> Dict[str, Any]:
-    res = adjudicate(case["address"], provider_result=case.get("provider"), policy=case.get("policy"))
+    res = adjudicate(
+        case["address"],
+        chain=case.get("chain", "ethereum"),
+        provider_result=case.get("provider"),
+        policy=case.get("policy"),
+        local_flow_data=case.get("local_flow_data"),
+        local_graph_data=case.get("local_graph_data"),
+        own_labels=case.get("own_labels"),
+    )
     return {
         "name": case["name"],
         "verdict": res["verdict"],
         "risk_score": res["risk_score"],
         "expected": case.get("expect"),
         "match": res["verdict"] == case.get("expect"),
-        "swarm": {v["agent"]: v["vote"] for v in res["consensus"]["votes"]},
+        "swarm": {v["agent"]: v["vote"] for v in (res.get("consensus") or {}).get("votes", [])},
     }
 
 

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blockintql-deterministic"
+version = "0.1.1"
+description = "First-class, versioned, pure-Python deterministic screening core and sonar_consensus_v1 3-agent swarm for agentic on-chain compliance (open standard). Install standalone for the library/MCP: pip install blockintql-deterministic"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+  {name = "Block6IQ", email = "oss@block6iq.com"}
+]
+requires-python = ">=3.10"
+dependencies = []  # Pure stdlib; zero heavy deps for local/offline use
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/block6iq/blockintql-cli"
+Documentation = "https://github.com/block6iq/blockintql-cli/blob/main/docs/deterministic-library.md"
+Repository = "https://github.com/block6iq/blockintql-cli"
+"Bug Tracker" = "https://github.com/block6iq/blockintql-cli/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["blockintql_deterministic*"]
+
+[tool.setuptools.package-data]
+"blockintql_deterministic" = ["py.typed"]
+
+[project.optional-dependencies]
+mcp = ["mcp[cli]>=1.0"]  # For running the standalone MCP server
+
+[project.scripts]
+blockintql-deterministic = "blockintql_deterministic.__main__:main"
+
+[tool.setuptools]
+zip-safe = false

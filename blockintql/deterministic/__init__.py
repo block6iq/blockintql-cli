@@ -53,4 +53,4 @@ __all__ = [
     "verify_evidence_bundle",
 ]
 
-__version__ = "0.1.0"  # Will be managed with the spec version
+__version__ = "0.1.1"  # Standalone blockintql-deterministic version (kept in sync)

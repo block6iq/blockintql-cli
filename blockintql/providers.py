@@ -19,16 +19,8 @@ from .deterministic.core import (
 from .deterministic.swarm import run_sonar_consensus_v1
 from .deterministic.policy import DEFAULT_POLICY
 
-# Keep the old name working
-CANONICAL_PROVIDER_RULES = _CANONICAL or [  # populated after import
-    {
-        "category": "sanctions",
-        "recommended_verdict": "BLOCK",
-        "severity": "critical",
-        "label_tokens": {"sanction", "sanctions", "ofac", "sdn", "blocked"},
-    },
-    # ... (rest of the original list is kept in deterministic/core for now)
-]
+# Keep the old name working for backward compat
+CANONICAL_PROVIDER_RULES = _CANONICAL
 
 
 def _text_set(values: Iterable) -> set[str]:
@@ -70,71 +62,6 @@ def _collect_text_tokens(value) -> list[str]:
         if text:
             tokens.append(text)
     return tokens
-
-
-# The original list is now also defined in deterministic/core.py
-# We keep a copy here only for extreme backward compat during the transition.
-    {
-        "category": "sanctions",
-        "recommended_verdict": "BLOCK",
-        "severity": "critical",
-        "label_tokens": {"sanction", "sanctions", "ofac", "sdn", "blocked"},
-    },
-    {
-        "category": "mixer",
-        "recommended_verdict": "CAUTION",
-        "severity": "high",
-        "label_tokens": {"mixer", "mixing", "tumbler", "coinjoin", "tornado cash"},
-    },
-    {
-        "category": "ransomware",
-        "recommended_verdict": "BLOCK",
-        "severity": "critical",
-        "label_tokens": {"ransomware", "extortion"},
-    },
-    {
-        "category": "darknet",
-        "recommended_verdict": "BLOCK",
-        "severity": "critical",
-        "label_tokens": {"darknet", "dark market", "darknet market"},
-    },
-    {
-        "category": "scam",
-        "recommended_verdict": "BLOCK",
-        "severity": "critical",
-        "label_tokens": {"scam", "fraud", "phishing", "drainer", "hack", "exploit"},
-    },
-    {
-        "category": "gambling",
-        "recommended_verdict": "CAUTION",
-        "severity": "medium",
-        "label_tokens": {"gambling", "casino", "betting"},
-    },
-    {
-        "category": "exchange",
-        "recommended_verdict": "CLEAR",
-        "severity": "low",
-        "label_tokens": {"exchange", "cex"},
-    },
-    {
-        "category": "defi",
-        "recommended_verdict": "CLEAR",
-        "severity": "low",
-        "label_tokens": {"defi", "dex", "amm", "protocol"},
-    },
-    {
-        "category": "bridge",
-        "recommended_verdict": "CAUTION",
-        "severity": "medium",
-        "label_tokens": {"bridge", "cross-chain"},
-    },
-    {
-        "category": "wallet",
-        "recommended_verdict": "CLEAR",
-        "severity": "low",
-        "label_tokens": {"wallet", "eoa", "externally_owned_account"},
-    },
-]
 
 
 def adjudicate_provider_result(result: dict) -> dict:

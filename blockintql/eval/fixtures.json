@@ -1,0 +1,81 @@
+[
+  {
+    "name": "sanctions_hit",
+    "address": "0x0000000000000000000000000000000000000000",
+    "chain": "ethereum",
+    "provider_result": {"sanctions_hit": true},
+    "expected": {"verdict": "BLOCK", "risk_score": 100}
+  },
+  {
+    "name": "high_risk_unmapped",
+    "address": "0x1111111111111111111111111111111111111111",
+    "chain": "ethereum",
+    "provider_result": {"risk_score": 92, "entity_category": "unknown"},
+    "expected": {"verdict": "CAUTION", "risk_score": 92}
+  },
+  {
+    "name": "mixer_with_flow_taint",
+    "address": "0x2222222222222222222222222222222222222222",
+    "chain": "ethereum",
+    "provider_result": {"entity_category": "mixer"},
+    "local_flow_data": {"events": [{"timestamp": "1", "token_symbol": "ETH", "direction": "inbound", "amount": 10}, {"timestamp": "2", "token_symbol": "ETH", "direction": "outbound", "amount": 5}]},
+    "expected": {"verdict": "CAUTION", "risk_score": 50}
+  },
+  {
+    "name": "clean_exchange",
+    "address": "0x3333333333333333333333333333333333333333",
+    "chain": "ethereum",
+    "provider_result": {"entity_category": "exchange", "risk_score": 5},
+    "expected": {"verdict": "CLEAR", "risk_score": 5}
+  },
+  {
+    "name": "tainted_flow_from_mixer",
+    "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "chain": "ethereum",
+    "provider_result": {"entity_category": "unknown", "risk_score": 35},
+    "local_flow_data": {
+      "events": [
+        {"timestamp": "2024-01-01T00:00:00Z", "token_symbol": "ETH", "direction": "inbound", "amount": 12.5, "from": "0xmixer0000000000000000000000000000000000"},
+        {"timestamp": "2024-01-02T00:00:00Z", "token_symbol": "ETH", "direction": "inbound", "amount": 4.2, "from": "0xmixer0000000000000000000000000000000000"},
+        {"timestamp": "2024-01-03T00:00:00Z", "token_symbol": "USDC", "direction": "outbound", "amount": 7.0}
+      ]
+    },
+    "expected": {"verdict": "BLOCK", "risk_score": 70}  /* Cypher saw mixer taint flows → BLOCK wins */
+  },
+  {
+    "name": "high_velocity_concentration",
+    "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "chain": "ethereum",
+    "provider_result": {"entity_category": "unknown", "risk_score": 40},
+    "local_graph_data": {
+      "hops": 12,
+      "unique_counterparties_24h": 87,
+      "rapid_transfers": 19,
+      "top_concentration_pct": 0.71
+    },
+    "expected": {"verdict": "BLOCK", "risk_score": 65}  /* Nova saw high velocity + concentration → BLOCK wins */
+  },
+  {
+    "name": "zero_data_pure_local",
+    "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+    "chain": "ethereum",
+    "provider_result": {},
+    "expected": {"verdict": "CLEAR", "risk_score": 12}
+  },
+  {
+    "name": "own_labels_override_clean",
+    "address": "0xdddddddddddddddddddddddddddddddddddddddd",
+    "chain": "ethereum",
+    "provider_result": {"entity_category": "unknown", "risk_score": 55},
+    "own_labels": {"0xdddddddddddddddddddddddddddddddddddddddd": {"entity_category": "exchange", "risk_score": 8}},
+    "expected": {"verdict": "CLEAR", "risk_score": 25}
+  },
+  {
+    "name": "sanctions_plus_flow",
+    "address": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "chain": "ethereum",
+    "provider_result": {"sanctions_hit": false, "risk_score": 20},
+    "local_flow_data": {"events": [{"timestamp": "1", "direction": "inbound", "amount": 100, "from": "0xsanctioned0000000000000000000000000000"}]},
+    "expected": {"verdict": "CLEAR", "risk_score": 30}  /* Flow taint alone (no direct sanctions hit on subject) currently yields CLEAR in pure local; Sentinel needs explicit provider or label hit */
+  }
+]

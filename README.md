@@ -5,11 +5,13 @@
 BlockINTQL CLI is the leading open-source foundation for building serious, auditable, agent-driven compliance and investigation systems.
 
 It gives you:
-- A first-class, versioned, pure-Python **deterministic screening core** (`blockintql.deterministic`) with an explicit 3-agent swarm (Sentinel / Cypher / Nova).
+- A first-class, versioned, pure-Python **deterministic screening core** (also available as the lightweight standalone `pip install blockintql-deterministic`) with an explicit 3-agent swarm (Sentinel / Cypher / Nova).
 - Reproducible **evidence bundles** for audit, SARs, and regulatory defense.
-- A powerful local **graph explorer** (Cytoscape + promptable shells) that works with data you fetch yourself.
-- Proper **MCP server** + tool surface so agents can use the same deterministic contracts humans do.
+- A powerful local **graph explorer** (Cytoscape + promptable shells, saved workspaces, timeline/attribution, one-click evidence export) that works with data you fetch yourself.
+- Proper **MCP server** + tool surface (with guardrails/HIL) so agents can use the same deterministic contracts humans do.
 - Full support for **bring-your-own-labels / bring-your-own-data** workflows.
+- Production-grade local graph algorithms (taint, communities, flow, betweenness, pagerank, modularity, GraphML/Neo4j exports, local deterministic on subgraphs, etc.).
+- Full local REPL default for chat when no key is set (uses the deterministic core directly).
 
 The open source project owns the *reasoning layer and control plane*. You can run it against BlockINTQL's hosted data, your own data, other vendors, or completely locally.
 

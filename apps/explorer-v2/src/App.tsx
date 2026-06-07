@@ -4,6 +4,7 @@ import { GraphPanel } from "./components/GraphPanel";
 import { NodeDrawer } from "./components/NodeDrawer";
 import { OrchestratorPanel } from "./components/OrchestratorPanel";
 import { PromptStudio } from "./components/PromptStudio";
+import { Timeline } from "./components/Timeline";
 import { TopBar } from "./components/TopBar";
 import { shellSpecClassName, shellSpecSummary } from "./shellSpec";
 import { useExplorerStore } from "./store";
@@ -128,6 +129,14 @@ export function App() {
         onToggleCollapse={() => setTimelineCollapsed((value) => !value)}
         onFocusStep={focusStep}
       />
+
+      {/* Deeper explorer timeline UI (next wave) - standalone OSS value, with evidence export integration and local deterministic tie-in */}
+      <Timeline 
+        events={getTimeline()} 
+        onFocusNode={setSelectedNodeKey} 
+        onExportEvidence={exportEvidence} 
+      />
+      {/* Note: timeline events can trigger local deterministic via the builder's run_local_deterministic_on_subgraph for production-grade local analysis */}
 
       {showPromptStudio ? (
         <PromptStudio
