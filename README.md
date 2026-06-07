@@ -12,6 +12,7 @@ It gives you:
 - Full support for **bring-your-own-labels / bring-your-own-data** workflows.
 - Production-grade local graph algorithms (taint, communities, flow, betweenness, pagerank, modularity, GraphML/Neo4j exports, local deterministic on subgraphs, etc.).
 - Full local REPL default for chat when no key is set (uses the deterministic core directly).
+- Production-grade local graph algorithms (taint, communities, flow, betweenness, pagerank, GraphML/Neo4j exports, etc.).
 
 The open source project owns the *reasoning layer and control plane*. You can run it against BlockINTQL's hosted data, your own data, other vendors, or completely locally.
 

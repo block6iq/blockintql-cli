@@ -137,6 +137,8 @@ export function App() {
         onExportEvidence={exportEvidence} 
       />
       {/* Note: timeline events can trigger local deterministic via the builder's run_local_deterministic_on_subgraph for production-grade local analysis */}
+      {/* Deeper explorer timeline UI (next wave) - standalone OSS value */}
+      <Timeline events={getTimeline()} onFocusNode={setSelectedNodeKey} />
 
       {showPromptStudio ? (
         <PromptStudio

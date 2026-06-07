@@ -15,6 +15,7 @@ pip install -e ./blockintql-deterministic
 ```
 
 **Primary library usage:**
+**Primary usage:**
 ```python
 from blockintql_deterministic import adjudicate, run_sonar_consensus_v1, export_evidence_bundle, Policy, load_policy
 
@@ -38,6 +39,9 @@ See the full open standard guide, custom policy examples, and how to implement `
 https://github.com/block6iq/blockintql-cli/tree/main/docs/how-to-implement-sonar-consensus-v1.md
 
 For the full MCP server, rich REPL, graph explorer, and `blockintql` commands use the main package (`pip install blockintql`).
+
+See the full open standard guide and CLI integration in the main repo:
+https://github.com/block6iq/blockintql-cli/tree/main/docs/how-to-implement-sonar-consensus-v1.md
 
 All logic is deterministic, auditable, and works fully locally / hybrid with any data sources.
 

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import React from 'react';
 
 type TimelineEvent = {
   time: string;
@@ -19,6 +20,9 @@ export function Timeline({ events, onFocusNode, onExportEvidence }: TimelineProp
   const [filter, setFilter] = useState('');
   const [sortBy, setSortBy] = useState<'time' | 'amount'>('time');
 
+};
+
+export function Timeline({ events, onFocusNode }: TimelineProps) {
   if (!events || events.length === 0) {
     return (
       <div className="timeline">
@@ -115,6 +119,19 @@ export function Timeline({ events, onFocusNode, onExportEvidence }: TimelineProp
               </a>
               {' → '}
               <a href="#" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onFocusNode?.(ev.to); }}>
+  return (
+    <div className="timeline">
+      <div className="section-label">Timeline / Attribution ({events.length} events)</div>
+      <div className="timeline-list">
+        {events.slice(0, 50).map((ev, idx) => (
+          <div key={idx} className="timeline-event">
+            <span className="time">{ev.time ? new Date(ev.time).toLocaleString() : 'unknown'}</span>
+            <span className="flow">
+              <a href="#" onClick={(e) => { e.preventDefault(); onFocusNode?.(ev.from); }}>
+                {ev.from.slice(0, 8)}...
+              </a>
+              {' → '}
+              <a href="#" onClick={(e) => { e.preventDefault(); onFocusNode?.(ev.to); }}>
                 {ev.to.slice(0, 8)}...
               </a>
             </span>
@@ -141,6 +158,11 @@ export function Timeline({ events, onFocusNode, onExportEvidence }: TimelineProp
         Click row or addresses to focus in graph. Use Export buttons for per-event or full workspace deterministic evidence bundles (ties into local core).
         Workspaces with this timeline can be saved/loaded as portable JSON.
       </p>
+          </div>
+        ))}
+      </div>
+      {events.length > 50 && <p className="truncated">... showing first 50 (full list via getTimeline() or export)</p>}
+      <p className="help">Click addresses to focus nodes. Use "Export Evidence Bundle" for full deterministic audit trail of this timeline.</p>
     </div>
   );
 }

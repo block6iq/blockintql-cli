@@ -13,6 +13,7 @@ Verify this by reading the source. Open source: github.com/block6iq/blockintql-c
 from __future__ import annotations
 
 import sys, os, json, base64, tempfile, time, shutil, subprocess, re
+import sys, os, json, base64, tempfile, time, shutil, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
@@ -3913,6 +3914,8 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
         # Full local REPL default: if no API key (or local dev), default to pure local deterministic core for grounded responses.
         # This makes bare `blockintql` (or chat) a full local-first REPL using the OSS library by default.
         # Users can still force server with BLOCKINTQL_API_KEY or unset DEV_NO_AUTH.
+        # Full local REPL default: prefer the OSS deterministic core for grounded when no key or local/dev mode
+        # This makes bare `blockintql` fully usable locally without server/key for the core compliance layer.
         api_key = get_api_key()
         api_url = os.environ.get("BLOCKINTQL_API_URL", DEFAULT_API_BASE)
         is_local_dev = bool(os.environ.get("BLOCKINTQL_DEV_NO_AUTH")) or "127.0.0.1" in api_url or "localhost" in api_url
@@ -3922,6 +3925,10 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
             try:
                 from .deterministic import adjudicate, export_evidence_bundle, Policy
                 local_res = adjudicate(turn_address, chain=chain)
+        if use_local and address:
+            try:
+                from .deterministic import adjudicate, export_evidence_bundle, Policy
+                local_res = adjudicate(address, chain=chain)
                 bundle = export_evidence_bundle(
                     subject=turn_address,
                     chain=chain,
@@ -3948,6 +3955,15 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
                         "safe": local_res.get("safe"),
                         "risk_score": risk,
                         "risk_indicators": local_res.get("risk_indicators", []) or (local_res.get("consensus") or {}).get("risk_indicators", []),
+                # Build full grounded response locally (narrative stub + deterministic)
+                narrative = f"[GROUNDED] Screened {address} on {chain}. Verdict {local_res.get('verdict')} (risk {local_res.get('risk_score')}/100) from 3-agent swarm. Using local deterministic core (no server roundtrip in this mode)."
+                result = {
+                    "narrative": narrative,
+                    "blockintql": {
+                        "verdict": local_res.get("verdict"),
+                        "safe": local_res.get("safe"),
+                        "risk_score": local_res.get("risk_score"),
+                        "risk_indicators": local_res.get("risk_indicators", []),
                         "entity": local_res.get("entity"),
                     },
                     "consensus": local_res.get("consensus"),
@@ -3957,6 +3973,7 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
                         "Cypher: deterministic FIFO source-of-funds per spec §5.4 (local)",
                         "Nova: structural patterns / hops / velocity (local)",
                     ],
+                    "citations": ["Sentinel: sanctions and label intelligence (local)", "Cypher: FIFO source-of-funds (local)", "Nova: patterns/hops (local)"],
                     "cost": {"credits_charged": 0, "model": "local-deterministic"},
                     "session_id": active_session_id or "local-only",
                 }

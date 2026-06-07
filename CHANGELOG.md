@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Explorer workspace save/load + one-click evidence.
 - CLI `deterministic adjudicate` + `eval` (13/13 on current suite).
 - Expanded local/hybrid power.
+- Deeper explorer-v2 timeline UI: dedicated `Timeline` React component with focusable events, integrated into main view; `getTimeline()` + attribution support in store.
+- `blockintql-deterministic` as its own lightweight published package (separate `pyproject.toml`/`setup.py`, `blockintql_deterministic/` namespace, self-contained for `pip install blockintql-deterministic` while keeping main CLI re-exports for convenience).
+- More production-grade local graph algorithms in `GraphBuilder`: `compute_betweenness_centrality` (Brandes approx), `compute_pagerank` (lightweight iteration), enhanced `compute_flow_analysis`, `add_timeline_view`, plus GraphML + Neo4j Cypher exports.
+- Explorer workspace save/load now fully functional (portable JSON); one-click evidence + timeline buttons wired.
+- CLI `deterministic adjudicate` now supports `--labels` (BYO labels end-to-end).
+- Expanded `blockintql.graph` and explorer for fully local/hybrid "production" use without any central service.
 
 See PR body for the prior foundation wave that this builds directly on.
 
