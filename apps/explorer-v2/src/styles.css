@@ -138,6 +138,38 @@ input {
   flex-wrap: wrap;
 }
 
+/* Redesign: Legitimate blockchain explorer look (solid header, dominant search like Etherscan/Blockscout, de-emphasize toy shell chrome) */
+.explorer-header {
+  border-radius: 8px !important;
+  background: #0a111e !important;
+}
+.top-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  max-width: 620px;
+  margin: 0 1rem;
+}
+.explorer-search {
+  flex: 1;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #050c17;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.9rem;
+}
+.explorer-search:focus {
+  outline: none;
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px rgba(118, 235, 255, 0.1);
+}
+.top-search button {
+  white-space: nowrap;
+}
+
 .tool-chip {
   display: inline-flex;
   align-items: center;
@@ -1266,6 +1298,36 @@ button:disabled {
   flex-wrap: wrap;
   align-items: center;
 }
+
+/* Professional explorer-v2 table & wallet summary to match the real Block6IQ NODE_TRANSACTIONS experience */
+.wallet-summary { border:1px solid var(--line); border-radius:14px; padding:12px 14px; margin:8px 0 12px; background:rgba(6,12,22,.6); }
+.ws-head { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.ws-big { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px; }
+.ws-metric label { font-size:10px; color:var(--muted); }
+.ws-metric strong { font-size:20px; color:var(--cyan); line-height:1; }
+.ws-row { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; font-size:11px; }
+.ws-row .v { font-weight:600; }
+.ws-holdings .h-list { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+.h-pill { font-size:10px; padding:1px 6px; border:1px solid var(--line); border-radius:999px; background:rgba(255,255,255,.03); }
+
+.pro-table { font-size:12px; width:100%; border-collapse:collapse; }
+.pro-table th { font-weight:500; color:var(--muted); padding:4px 6px; border-bottom:1px solid var(--line); text-align:left; font-size:10px; }
+.pro-table td { padding:3px 6px; border-bottom:1px solid rgba(102,215,255,.07); vertical-align:middle; }
+.tx-col .txh { font-family:var(--mono); }
+.addr-btn { all:unset; color:var(--cyan); cursor:pointer; }
+.addr-btn:hover { text-decoration:underline; }
+.trace-btn { font-size:9px; padding:1px 5px; margin-left:4px; border:1px solid var(--line-strong); border-radius:3px; background:rgba(118,235,255,.08); color:var(--cyan); cursor:pointer; }
+.flow-pill, .risk-pill, .tok { font-size:9px; padding:0 5px; border-radius:999px; font-weight:600; }
+.flow-pill.in { background:rgba(151,255,209,.15); color:var(--mint); }
+.flow-pill.out { background:rgba(255,171,104,.15); color:var(--orange); }
+.bal { font-family:var(--mono); font-size:11px; }
+
+.intel-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:8px 0; }
+.intel-card { border:1px solid var(--line); border-radius:10px; padding:6px 8px; font-size:10px; background:rgba(6,12,22,.5); }
+.ih { display:flex; justify-content:space-between; font-weight:600; margin-bottom:2px; }
+.st { font-size:9px; padding:0 4px; border-radius:999px; background:rgba(255,255,255,.06); }
+
+.bottom-bar { display:flex; justify-content:space-between; align-items:center; margin-top:6px; padding-top:6px; border-top:1px solid var(--line); font-size:11px; }
 
 .table-toolbar {
   justify-content: flex-end;

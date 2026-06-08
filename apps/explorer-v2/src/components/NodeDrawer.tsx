@@ -238,6 +238,56 @@ export function NodeDrawer({
 
         {isLoading ? <div className="drawer-note">Loading live indexed history, balances, and stats for this node...</div> : null}
 
+        {/* Prominent Wallet Summary — modeled directly on the professional Block6IQ NODE_TRANSACTIONS panel */}
+        <div className="wallet-summary">
+          <div className="ws-head">
+            <div className="section-label">WALLET SUMMARY</div>
+            <span className="chain-pill">ETHEREUM</span>
+            {serviceWalletLabel ? <span className="chain-pill hot">{serviceWalletLabel}</span> : null}
+          </div>
+
+          <div className="ws-big">
+            <div className="ws-metric">
+              <label>Total Balance (USD)</label>
+              <strong>{formatUsd(details.holdings.reduce((s, h) => s + (h.usd || 0), 0))}</strong>
+            </div>
+            <div className="ws-metric">
+              <label>Total Volume (USD)</label>
+              <strong>{formatUsd(details.metrics.inboundUsd + details.metrics.outboundUsd)}</strong>
+            </div>
+          </div>
+
+          <div className="ws-row">
+            <div><label>First Activity</label><div className="v">{formatDate(details.metrics.firstActivity)}</div></div>
+            <div><label>Last Activity</label><div className="v">{formatDate(details.metrics.lastActivity)}</div></div>
+            <div><label>Transactions</label><div className="v">{details.metrics.transactions}</div></div>
+            <div><label>Net Flow</label><div className="v">{formatCompactUsd(details.metrics.netUsd)}</div></div>
+          </div>
+
+          {details.holdings.length > 0 && (
+            <div className="ws-holdings">
+              <div className="section-label small">Token Holdings</div>
+              <div className="h-list">
+                {details.holdings.slice(0, 5).map(h => (
+                  <span key={h.symbol} className="h-pill">{h.symbol} {h.balance.toLocaleString(undefined,{maxFractionDigits:4})} {h.usd ? `· ${formatCompactUsd(h.usd)}` : ''}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Agent Trace + Behavior Profile (real explorer sections) */}
+        <div className="intel-grid">
+          <div className="intel-card">
+            <div className="ih"><span>Agent Trace</span><span className="st">Idle</span></div>
+            <div className="ib">Supervised flow tracing powered by the local deterministic swarm (Sentinel sanctions, Cypher FIFO, Nova patterns). Plot selected rows or use Trace to expand attributed paths.</div>
+          </div>
+          <div className="intel-card">
+            <div className="ih"><span>Behavior Profile</span></div>
+            <div className="ib">Velocity, concentration, taint, and risk signals computed from the plotted transaction set + local 3-agent consensus. Use the Export Evidence button for the full reproducible bundle.</div>
+          </div>
+        </div>
+
         {visibleCounterparties.length ? (
           <div className="counterparty-strip">
             <div className="section-label">{isThreatMode ? "Flagged Counterparties" : "Top Counterparties"}</div>
@@ -338,123 +388,59 @@ export function NodeDrawer({
         </div>
 
         <div className="table-wrap">
-          <table className="table">
+          <table className="table pro-table">
             <thead>
               <tr>
                 <th></th>
                 <th>Date</th>
-                <th>Tx Hash</th>
-                <th>Trace</th>
+                <th>TX Hash</th>
                 <th>Flow</th>
                 <th>Risk</th>
-                <th>Asset</th>
                 <th>From</th>
                 <th>To</th>
                 <th>USD</th>
                 <th>Amount</th>
-                <th>Evidence</th>
+                <th>Token</th>
+                <th>Balance After</th>
               </tr>
             </thead>
             <tbody>
-              {details.transactions.map((row) => {
+              {details.transactions.slice(0, 50).map((row) => {
                 const rowKey = transactionKey(row);
                 const isSelected = selectedRowKeys.includes(rowKey);
                 const isFocused = focusedTransactionKey === rowKey;
+                const usdVal = (row as any).usd ?? ((row.asset || '').match(/USDC|USDT|DAI/i) ? row.amount : null);
+                const balAfter = (row as any).balanceAfter;
+
                 return (
-                <tr
-                  key={row.txHash + row.date}
-                  className={`${isSelected ? "is-selected" : ""} ${isFocused ? "is-focused" : ""}`.trim()}
-                  onClick={() => onFocusTransaction(nodeKey, rowKey)}
-                >
-                  <td>
-                    <input
-                      className="row-check"
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={(event) => {
-                        event.stopPropagation();
-                        onToggleRow(nodeKey, rowKey);
-                      }}
-                    />
-                  </td>
-                  <td>{formatDate(row.date)}</td>
-                  <td className="tx-hash">{row.txHash.slice(0, 10)}...</td>
-                  <td>
-                    <button
-                      className="trace-button"
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void onTraceTransaction(nodeKey, rowKey);
-                      }}
-                    >
-                      Trace
-                    </button>
-                  </td>
-                  <td>
-                    <span className={`flow-pill ${row.flow}`}>{row.flow.toUpperCase()}</span>
-                  </td>
-                  <td><span className={`risk-pill ${row.evidence}`}>{row.evidence}</span></td>
-                  <td>{row.asset}</td>
-                  <td>
-                    <button className="address-button" type="button" onClick={(event) => {
-                      event.stopPropagation();
-                      onOpenCounterparty(nodeKey, rowKey, "from");
-                    }}>
-                      {formatAddress(row.from)}
-                    </button>
-                  </td>
-                  <td>
-                    <button className="address-button" type="button" onClick={(event) => {
-                      event.stopPropagation();
-                      onOpenCounterparty(nodeKey, rowKey, "to");
-                    }}>
-                      {formatAddress(row.to)}
-                    </button>
-                  </td>
-                  <td>{row.asset === "USDC" ? formatUsd(row.amount) : "—"}</td>
-                  <td>{row.amount.toLocaleString(undefined, { maximumFractionDigits: 6 })}</td>
-                  <td>{row.evidence}</td>
-                </tr>
-              )})}
+                  <tr key={row.txHash + row.date} className={`${isSelected ? "is-selected" : ""} ${isFocused ? "is-focused" : ""}`.trim()} onClick={() => onFocusTransaction(nodeKey, rowKey)}>
+                    <td><input className="row-check" type="checkbox" checked={isSelected} onChange={(e) => { e.stopPropagation(); onToggleRow(nodeKey, rowKey); }} /></td>
+                    <td>{formatDate(row.date)}</td>
+                    <td className="tx-col">
+                      <span className="txh">{row.txHash.slice(0,8)}…</span>
+                      <button className="trace-btn" onClick={(e)=>{e.stopPropagation(); void onTraceTransaction(nodeKey, rowKey);}}>Trace</button>
+                    </td>
+                    <td><span className={`flow-pill ${row.flow}`}>{row.flow.toUpperCase()}</span></td>
+                    <td><span className={`risk-pill ${row.evidence}`}>{row.evidence}</span></td>
+                    <td><button className="addr-btn" onClick={(e)=>{e.stopPropagation(); onOpenCounterparty(nodeKey, rowKey, "from");}}>{formatAddress(row.from)}</button></td>
+                    <td><button className="addr-btn" onClick={(e)=>{e.stopPropagation(); onOpenCounterparty(nodeKey, rowKey, "to");}}>{formatAddress(row.to)}</button></td>
+                    <td>{usdVal != null ? formatCompactUsd(usdVal) : "—"}</td>
+                    <td>{row.amount.toLocaleString(undefined, {maximumFractionDigits: 6})}</td>
+                    <td><span className="tok">{row.asset}</span></td>
+                    <td className="bal">{balAfter != null ? Number(balAfter).toLocaleString(undefined, {maximumFractionDigits: 4}) : "—"}</td>
+                  </tr>
+                );
+              })}
+              {details.transactions.length === 0 && <tr><td colSpan={11} className="empty">No transactions. Upload seeds from ControlBar or connect live API for real history.</td></tr>}
             </tbody>
           </table>
         </div>
 
-        <div className="summary-grid">
-          <div className="meta-card summary-card">
-            <label>Total Transactions</label>
-            <strong>{details.metrics.transactions}</strong>
-          </div>
-          <div className="meta-card summary-card">
-            <label>First Activity</label>
-            <strong>{formatDate(details.metrics.firstActivity)}</strong>
-          </div>
-          <div className="meta-card summary-card">
-            <label>Last Activity</label>
-            <strong>{formatDate(details.metrics.lastActivity)}</strong>
-          </div>
-          <div className="meta-card summary-card">
-            <label>Total Balance</label>
-            <strong>{formatUsd(details.holdings.reduce((sum, holding) => sum + holding.usd, 0))}</strong>
-          </div>
-        </div>
-
-        <div className="holdings">
-          <div className="holdings-head">
-            <div className="section-label">Wallet Summary</div>
-            <span className="status-line">Token holdings</span>
-          </div>
-          <div className="holdings-grid">
-            {details.holdings.map((holding) => (
-              <div className="holding-row" key={holding.symbol}>
-                <strong>{holding.symbol}</strong>
-                <div>
-                  {holding.balance.toLocaleString(undefined, { maximumFractionDigits: 4 })} · {formatUsd(holding.usd)}
-                </div>
-              </div>
-            ))}
-          </div>
+        <div className="bottom-bar">
+          <div className="status-line">{selectedCount} selected for plotting • in/out flows will be added to the graph canvas</div>
+          <button className="primary plot-bar-button" onClick={() => onPlotSelected(nodeKey)} disabled={selectedCount===0}>
+            Plot Selected {selectedCount ? `(${selectedCount})` : ""}
+          </button>
         </div>
       </div>
     </aside>

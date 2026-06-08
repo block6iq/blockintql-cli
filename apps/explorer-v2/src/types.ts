@@ -45,6 +45,9 @@ export type ExplorerTransaction = {
   to: string;
   amount: number;
   evidence: string;
+  // Added for professional table feel (balance after this tx for the node)
+  balanceAfter?: number;
+  usd?: number; // approximate usd value of the transfer
 };
 
 export type CounterpartySummary = {

@@ -185,7 +185,22 @@ export function GraphCanvas({
       cy.pan(previousPan);
     }
     cy.on("tap", "node", (event) => {
-      onSelectNode(event.target.id());
+      const id = event.target.id();
+      onSelectNode(id);
+      // Real explorer: clicking address auto-loads/expands tx history in drawer (already wired) and logs for debug
+      console.log("[Explorer Graph] Clicked address node:", id, "-> loading tx history + details");
+    });
+    // Double-click node to expand counterparties (real explorer expand graph behavior)
+    cy.on("dbltap", "node", (event) => {
+      const id = event.target.id();
+      const raw = id.replace("node:", "");
+      console.log("[Explorer] Double-click expand on", raw);
+      if ((window as any).explorerExpandNode) {
+        (window as any).explorerExpandNode(raw);
+      } else {
+        // Fallback hint
+        alert(`Expand graph for ${raw} (in full: calls expandCounterparties + load more history)`);
+      }
     });
     cyRef.current = cy;
     return () => cy.destroy();
@@ -213,6 +228,49 @@ export function GraphCanvas({
       }
     });
   }, [highlightedEdgeKeys]);
+
+  // Attach export functions to window for topbar "Export PNG/SVG" (real explorer feature)
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    (window as any).explorerExportGraph = () => {
+      try {
+        const pngData = cy.png({ full: true, scale: 2, bg: "#0a111e" }); // dark explorer bg
+        const link = document.createElement("a");
+        link.href = pngData;
+        link.download = `blockintql-graph-${Date.now()}.png`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        console.log("[Explorer] Graph PNG exported");
+      } catch (e) {
+        console.error("Export PNG failed", e);
+        alert("Graph export failed (check console).");
+      }
+    };
+    (window as any).explorerExportGraphSVG = () => {
+      try {
+        const svgData = cy.svg({ full: true });
+        const blob = new Blob([svgData], { type: "image/svg+xml" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `blockintql-graph-${Date.now()}.svg`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        console.log("[Explorer] Graph SVG exported");
+      } catch (e) {
+        console.error("Export SVG failed", e);
+        alert("SVG export not fully supported in this Cytoscape build.");
+      }
+    };
+    return () => {
+      delete (window as any).explorerExportGraph;
+      delete (window as any).explorerExportGraphSVG;
+    };
+  }, []);
 
   return <div className="graph-canvas-react" ref={containerRef} />;
 }
