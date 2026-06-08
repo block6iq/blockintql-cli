@@ -60,6 +60,9 @@ export function App() {
   (window as any).explorerSaveWorkspace = saveWorkspace;
   (window as any).explorerLoadWorkspace = (json: string) => loadWsFromStore(json);
   (window as any).explorerGetTimeline = getTimeline;
+  // Expose for top search bar (real explorer address search/add behavior)
+  (window as any).explorerUploadSeeds = uploadSeeds;
+  (window as any).explorerExpandNode = expandCounterparties; // for dblclick expand in canvas like real explorers
 
   const details = useMemo(() => nodeDetails[selectedNodeKey] || null, [nodeDetails, selectedNodeKey]);
   const selectedRows = selectedTransactionKeys[selectedNodeKey] ?? [];

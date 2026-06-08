@@ -67,3 +67,21 @@ Builds on prior waves (rich BlockINTQL Chat default, operational graph shell, vi
   - 3 agents (Sentinel/Cypher/Nova) now do substantive work and visibly vote.
 
 See git history for full details of prior features (provider integration, x402 payments, LangChain tool, etc.).
+
+## Unreleased - Graph Explorer Redesign (real blockchain explorer UX)
+
+### Changed
+- Complete redesign of explorer-v2 (used by `blockintql graph shell`) to feel and function like a legitimate blockchain explorer analytics platform instead of a toy shell.
+- New prominent TopBar address search: paste real 0x... + "Add to Graph" (uploadSeeds + auto-focus).
+- Click nodes in graph → loads full tx history + wallet summary in drawer.
+- Double-click nodes → expand counterparties (graph growth).
+- Professional NodeDrawer: top Wallet Summary card (balance, volume, first/last activity, holdings), dense pro-table with Balance After column, Flow/Risk pills, labeled From/To, checkboxes, "Plot Selected".
+- Plot selected transactions now reliably adds real in/out directed edges + nodes to the live Cytoscape canvas.
+- Graph image export: dedicated PNG (high-res dark bg) + SVG buttons in top bar using native Cytoscape export + download.
+- De-clunked UI: search + exports are primary; shell customization de-emphasized ("Advanced Shell"), new explorer-header + search input styles for solid explorer look.
+- Real address smoke tests (e.g. 0x742d35Cc6634C0532925a3b844Bc9e7595f6EEd0).
+- Globals exposed for standalone use; ShellSpec still controls initial prompt/spec but no longer dominates the explorer chrome.
+
+This addresses the request for search addresses, click addresses, view transaction history, plot transactions, expand graphs, and export images of the graph — now works like a real explorer.
+
+See feat/redesign-graph-explorer-ui for the diff and smoke link example.

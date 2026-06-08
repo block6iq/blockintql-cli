@@ -68,15 +68,21 @@ function normalizeHistoryRow(address: string, row: HistoryRow): ExplorerTransact
   const asset = String(row.token_symbol || (row.type === "native" ? "ETH" : "TOKEN"));
   const evidence = String(row.status || "indexed").toLowerCase();
 
+  const flow = to.toLowerCase() === address.toLowerCase() ? "in" : "out";
+  const amt = toNumber(row.amount);
+  // Simple usd estimate for stablecoins / common tokens (real server provides better)
+  const usd = /usdc|usdt|dai|busd/i.test(asset) ? amt : undefined;
+
   return {
     date: String(row.block_time || ""),
     txHash: String(row.tx_hash || ""),
-    flow: to.toLowerCase() === address.toLowerCase() ? "in" : "out",
+    flow,
     asset,
     from,
     to,
-    amount: toNumber(row.amount),
+    amount: amt,
     evidence,
+    usd,
   };
 }
 

@@ -7,7 +7,7 @@ import type { CounterpartySummary, ExplorerNodeDetails, ExplorerTransaction, Gra
 
 const DEFAULT_API_BASE = "https://blockintql.com";
 const INITIAL_WORKSPACE_ID = initialWorkspaceId();
-const INITIAL_SEED_ADDRESS = initialSeedAddress();
+const INITIAL_SEED_ADDRESS = initialSeedAddress() || "0x742d35Cc6634C0532925a3b844Bc9e7595f6EEd0"; // real address for smoke tests (Binance hot wallet example)
 
 function initialSearchParam(name: string) {
   if (typeof window === "undefined") return "";
