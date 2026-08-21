@@ -175,7 +175,7 @@ Target files:
 
 Tasks:
 
-1. Update setup guidance so wallet-based pay-per-request usage is described as a first-class path.
+1. Update setup guidance so wallet-based pay-per-request is documented as a supported path.
 2. Replace any wording that implies payment configuration alone is sufficient if runtime authorization is not yet wired in.
 3. Add examples showing keyless execution for agent mode.
 4. Keep public wording aligned with the validated command behavior.

@@ -1,9 +1,5 @@
 """
-Policy system — first-class support for custom deterministic rule sets.
-
-Organizations can maintain their own policies that still produce the
-`sonar_consensus_v1` output shape. This is critical for auditability
-and for making the OSS useful beyond a single vendor.
+Custom policy rules that still emit `sonar_consensus_v1` output.
 """
 
 from __future__ import annotations

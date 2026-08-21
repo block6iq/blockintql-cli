@@ -1,8 +1,7 @@
 """BlockINTQL Provider Plugin System
 
-Backward-compatible re-exports from the new first-class deterministic core.
+Re-exports from the deterministic core.
 
-New recommended import for agents and power users:
     from blockintql.deterministic import adjudicate, run_sonar_consensus_v1
 """
 
@@ -410,7 +409,7 @@ def list_providers() -> list:
     return [
         {
             "name": "blockintai",
-            "description": "BlockINTAI — local custom screening route with first-class CLI defaults",
+            "description": "BlockINTAI — local custom screening route",
         },
         *items,
     ]

@@ -1,8 +1,8 @@
 # blockintql-deterministic
 
-First-class, versioned, pure-Python deterministic screening core + `sonar_consensus_v1` 3-agent swarm (Sentinel / Cypher / Nova) for agentic on-chain compliance.
+Python deterministic screening core and `sonar_consensus_v1` swarm (Sentinel / Cypher / Nova).
 
-This is the reusable open standard / library extracted from the blockintql-cli OSS project.
+Extracted from blockintql-cli so it can be installed without the full CLI.
 
 **Install independently:**
 ```bash
@@ -43,6 +43,6 @@ For the full MCP server, rich REPL, graph explorer, and `blockintql` commands us
 See the full open standard guide and CLI integration in the main repo:
 https://github.com/block6iq/blockintql-cli/tree/main/docs/how-to-implement-sonar-consensus-v1.md
 
-All logic is deterministic, auditable, and works fully locally / hybrid with any data sources.
+Deterministic, runs locally, and accepts data from any source.
 
-MIT licensed. Part of the effort to make blockintql-cli the leading open source agentic compliance foundation.
+MIT licensed.

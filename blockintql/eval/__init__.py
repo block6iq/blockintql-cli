@@ -44,7 +44,7 @@ MORE_EVAL_FIXTURES = [
     {"name": "ransomware", "address": "0xransom", "provider": {"entity_category": "ransomware"}, "expect": "BLOCK"},
 ]
 
-# Load additional fixtures from JSON for production-grade testing
+# Load additional fixtures from JSON
 import json
 import os
 FIXTURES_PATH = os.path.join(os.path.dirname(__file__), "fixtures.json")

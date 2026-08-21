@@ -1,8 +1,5 @@
 """
-Proper, production-grade MCP server for the BlockINTQL open-source deterministic core.
-
-This is the primary way agents (Claude, Cursor, custom ReAct loops, etc.) should
-interact with the reasoning layer. It exposes the full audited contracts.
+MCP server for the BlockINTQL deterministic screening core.
 
 Install: pip install "mcp[cli]"
 Run:     python -m blockintql.mcp.server

@@ -1,6 +1,6 @@
 # BlockINTQL Deterministic Library (v0.1+)
 
-This is the new first-class, importable core of the open source project.
+Importable screening core used by the CLI, MCP server, and agent examples.
 
 ## Installation & Usage
 
@@ -35,7 +35,7 @@ The three named deterministic agents are implemented in pure Python in `blockint
 - **Cypher** — source-of-funds continuity (FIFO lot accounting style)
 - **Nova** — structural / hop / velocity / concentration patterns
 
-They are deliberately simple and auditable. The contract is that the same inputs + same policy version always produce the same votes.
+They are kept small so the same inputs and policy version always produce the same votes.
 
 ## Custom Policies
 
@@ -64,7 +64,7 @@ The output still uses the `sonar_consensus_v1` shape so downstream agents and au
 - Final verdict
 - Reproducibility hash
 
-This is what regulated entities need when something goes wrong six months later.
+Keep the bundle with the case file if you need to show how a verdict was produced.
 
 ## MCP Server
 
@@ -78,4 +78,4 @@ Exposes `blockintql_adjudicate`, `blockintql_swarm`, `blockintql_export_evidence
 
 All functions in this library are pure and deterministic. Given the same normalized inputs and the same `Policy`, the output (including the `reproducibility_hash`) will be identical across runs, Python versions, and machines.
 
-This is the foundation we are building the open source agentic compliance ecosystem on top of.
+

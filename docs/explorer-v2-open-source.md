@@ -13,7 +13,7 @@ A React + Cytoscape.js analyst graph foundation with:
 - right-side node transaction drawer
 - holdings section
 - transaction table
-- expansion action affordances
+- node expansion
 
 ## What it is not
 
@@ -57,4 +57,4 @@ Instead, they should map into a deterministic shell spec that controls:
 
 See also:
 
-- [Graph Shell CLI Surface](/Users/block6iq/Documents/Playground/blockintql-cli/docs/graph-shell-cli-surface.md)
+- [Graph Shell CLI Surface](graph-shell-cli-surface.md)

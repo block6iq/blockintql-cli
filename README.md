@@ -1,22 +1,17 @@
-# BlockINTQL CLI (Open Source)
+# BlockINTQL CLI
 
-**The open control plane and reasoning layer for agentic on-chain compliance.**
+Open-source CLI, deterministic screening library, and graph explorer for on-chain investigation.
 
-BlockINTQL CLI is the leading open-source foundation for building serious, auditable, agent-driven compliance and investigation systems.
+Includes:
+- A versioned Python **deterministic screening core** (`blockintql.deterministic`, also `pip install blockintql-deterministic`) with Sentinel, Cypher, and Nova
+- Reproducible **evidence bundles**
+- A local **graph explorer** (Cytoscape, saved workspaces, timeline, evidence export)
+- An **MCP server** so agents can call the same screening contracts
+- Bring-your-own labels and data
+- Local graph algorithms (taint, communities, flow, betweenness, pagerank; GraphML/Neo4j export)
+- A local chat REPL when no API key is set
 
-It gives you:
-- A first-class, versioned, pure-Python **deterministic screening core** (also available as the lightweight standalone `pip install blockintql-deterministic`) with an explicit 3-agent swarm (Sentinel / Cypher / Nova).
-- Reproducible **evidence bundles** for audit, SARs, and regulatory defense.
-- A powerful local **graph explorer** (Cytoscape + promptable shells, saved workspaces, timeline/attribution, one-click evidence export) that works with data you fetch yourself.
-- Proper **MCP server** + tool surface (with guardrails/HIL) so agents can use the same deterministic contracts humans do.
-- Full support for **bring-your-own-labels / bring-your-own-data** workflows.
-- Production-grade local graph algorithms (taint, communities, flow, betweenness, pagerank, modularity, GraphML/Neo4j exports, local deterministic on subgraphs, etc.).
-- Full local REPL default for chat when no key is set (uses the deterministic core directly).
-- Production-grade local graph algorithms (taint, communities, flow, betweenness, pagerank, GraphML/Neo4j exports, etc.).
-
-The open source project owns the *reasoning layer and control plane*. You can run it against BlockINTQL's hosted data, your own data, other vendors, or completely locally.
-
-The company behind it sells high-quality data, scale, and legal-grade support on top of this open foundation. This is the healthy split.
+Works against BlockINTQL hosted data, your own data, other vendors, or fully locally.
 
 ## Disclaimer
 
@@ -46,15 +41,12 @@ AI-generated outputs may contain errors. Commands using AI-powered analysis prod
 
 The Service supports optional integration with third-party blockchain analytics providers. If you configure a provider key, the CLI queries that provider directly from your machine. Your provider API key is never transmitted to Block6IQ servers. It is your sole responsibility to confirm that your use of any provider's API via the Service is permitted under your agreement with that provider.
 
-### 6. Open Source Positioning
+### 6. Open Source
 
-This repository is the **open control plane and deterministic reasoning layer** for agentic compliance.
+This repository is MIT licensed.
 
-- `blockintql.deterministic`, the swarm, evidence bundles, MCP server, graph explorer, and CLI are all MIT licensed and intended to be used, forked, and implemented by others.
+- `blockintql.deterministic`, the swarm, evidence bundles, MCP server, graph explorer, and CLI can be used, forked, and reimplemented.
 - The spec (`docs/deterministic-screening-spec-v1.md`) is published so independent implementations can produce compatible `sonar_consensus_v1` output.
-- The company sells high-quality data, hosted scale, and legal-grade support on top of this open foundation.
-
-This is the healthy split we are deliberately building toward.
 
 ### 7. No Warranty; Liability Cap
 

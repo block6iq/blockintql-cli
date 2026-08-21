@@ -37,9 +37,8 @@ This includes deeper and expanded workflows such as:
 
 ## Why this update matters
 
-- Clearer first-run experience for new users
-- Stronger trust in command-level launch status
-- Cleaner handoff for teams building production workflows on top of the CLI
+- `--help` matches what is actually live vs preview
+- `capabilities` reflects launch-ready scope by default
 
 ## Notes for builders
 

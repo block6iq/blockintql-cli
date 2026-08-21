@@ -100,7 +100,7 @@ export function ControlBar({
           onClick={() => {
             const tl = (window as any).explorerGetTimeline ? (window as any).explorerGetTimeline() : [];
             console.log("[Explorer] Timeline / attribution events:", tl);
-            alert(`Timeline: ${tl.length} events logged to console (next wave: full UI view)`);
+            alert(`Timeline: ${tl.length} events logged to console`);
           }}
         >
           Show Timeline
