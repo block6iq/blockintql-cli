@@ -1,18 +1,11 @@
 """
-Reference implementation of sonar_consensus_v1 — the 3-agent deterministic swarm.
+sonar_consensus_v1 — Sentinel, Cypher, and Nova.
 
-This is deliberately simple, pure, and auditable. It is the OSS reference
-implementation that anyone can read, test, fork, or re-implement.
+- Sentinel: sanctions + high-confidence labels (BLOCK on sanctions)
+- Cypher: source-of-funds continuity (FIFO / reverse-FIFO)
+- Nova: hop / velocity / counterparty patterns
 
-Agents:
-- Sentinel: sanctions + high-confidence label intelligence (hard BLOCK on sanctions)
-- Cypher: source-of-funds continuity using deterministic FIFO / reverse-FIFO lot accounting
-- Nova: structural / hop / velocity / counterparty pattern detection
-
-The contract guarantees:
-- No randomness
-- Same inputs + same policy → identical votes and final decision
-- Named voters appear in the `votes` array for agentic consumption and audit
+Same inputs + same policy → identical votes. Named voters are in `votes`.
 """
 
 from __future__ import annotations

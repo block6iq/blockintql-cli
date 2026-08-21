@@ -88,7 +88,7 @@ class GraphBuilder:
         return dict(communities)
 
     def to_d3(self) -> Dict[str, Any]:
-        """Export for D3 or other local viz (standalone OSS value)."""
+        """Export for D3 or other local viz."""
         return {"nodes": self.nodes, "links": self.links, "communities": self.compute_local_communities()}
         seed = cluster_data.get("seed_address")
         self.add_address(seed, label="Seed", color="#ff6b6b", size=15)
@@ -109,7 +109,7 @@ class GraphBuilder:
         html = GraphTemplate.get_template(template)
         return html.replace("{{DATA}}", self.to_json())
 
-    # --- Next wave: more sophisticated local exports and algorithms for standalone OSS value ---
+    # Local graph algorithms
     def to_graphml(self) -> str:
         """Export to GraphML format (for yEd, Gephi, etc. - pure local)."""
         lines = ['<?xml version="1.0" encoding="UTF-8"?>']
@@ -152,7 +152,7 @@ class GraphBuilder:
         return '\n'.join(stmts)
 
     def add_timeline_view(self, events: List[Dict[str, Any]]):
-        """Add time-based attribution for timeline views (next wave item)."""
+        """Add time-based attribution for timeline views."""
         for ev in events:
             ts = ev.get("timestamp", "")
             tx = ev.get("txid", "")
@@ -187,7 +187,7 @@ class GraphBuilder:
         }
 
     def compute_betweenness_centrality(self, sample_k: int = 10) -> Dict[str, float]:
-        """Lightweight approximate betweenness centrality (production-grade local algo, no networkx dep)."""
+        """Approximate betweenness centrality (no networkx)."""
         from collections import defaultdict
         centrality: Dict[str, float] = defaultdict(float)
         nodes = [n["id"] for n in self.nodes]
@@ -225,7 +225,7 @@ class GraphBuilder:
         return {k: v / max_c for k, v in centrality.items()}
 
     def compute_pagerank(self, damping: float = 0.85, iterations: int = 20) -> Dict[str, float]:
-        """Lightweight PageRank simulation (production-grade local, pure Python)."""
+        """PageRank (pure Python)."""
         from collections import defaultdict
         nodes = [n["id"] for n in self.nodes]
         if not nodes:

@@ -1,8 +1,8 @@
 """
-Deterministic core adjudication logic (first-class library).
+Deterministic screening core.
 
-This is the authoritative, versioned, pure-Python implementation of the
-BlockINTQL deterministic screening contract (see docs/deterministic-screening-spec-v1.md).
+Python implementation of the BlockINTQL screening contract
+(see docs/deterministic-screening-spec-v1.md).
 
 Key guarantees:
 - Fully deterministic (no randomness)
@@ -25,7 +25,7 @@ import json
 from .policy import Policy, DEFAULT_POLICY
 
 
-# Canonical rules are the heart of the OSS deterministic layer.
+# Canonical rules.
 # These are public, versioned, and anyone can audit or extend via Policy.
 CANONICAL_PROVIDER_RULES: List[Dict[str, Any]] = [
     {"category": "sanctions", "recommended_verdict": "BLOCK", "severity": "critical", "label_tokens": {"sanction", "sanctions", "ofac", "sdn", "blocked"}},
@@ -119,7 +119,7 @@ def adjudicate_provider_result(result: Dict[str, Any], policy: Optional[Policy] 
     for rule in CANONICAL_PROVIDER_RULES:
         if any(token in haystack for token in rule["label_tokens"]):
             reasons.append(f"Matched provider category tokens for {rule['category']}.")
-            # Policy can override (first-class custom policy support)
+            # Policy can override
             pol = next((r for r in policy.rules if r.get("category") == rule["category"]), None)
             verdict = pol.get("verdict", rule["recommended_verdict"]) if pol else rule["recommended_verdict"]
             return {
@@ -185,7 +185,7 @@ def adjudicate(
     flow = local_flow_data or {}
     graph = local_graph_data or {}
 
-    # Merge own_labels into provider for local Sentinel etc. (first-class BYO labels)
+    # Merge own_labels into provider for local Sentinel etc.
     if own_labels and addr in own_labels:
         own = own_labels[addr]
         provider = {**provider, **{k: v for k, v in own.items() if k in ("entity_category", "risk_score", "sanctions_hit", "risk_indicators")}}

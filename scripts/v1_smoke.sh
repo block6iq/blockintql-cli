@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Full smoke for the OSS foundation + next wave (local REPL flows, real trace eval fixtures, graph shell, deterministic core, history/verdict etc).
+# Smoke: local REPL, eval fixtures, graph shell, deterministic core, history/verdict.
 # Works great with:
 #   export BLOCKINTQL_DEV_NO_AUTH=1
 #   export BLOCKINTQL_API_URL=http://127.0.0.1:8000
@@ -28,11 +28,11 @@ run_json status blockintql status || true
 run_json verdict blockintql verdict "$ADDRESS" || true
 run_json history blockintql history "$ADDRESS" --days 30 --limit 30 || true
 
-# The OSS deterministic core (the highest leverage part of the foundation + next wave)
+# Deterministic core
 run_json deterministic_eval blockintql deterministic eval
 run_json deterministic_adjudicate blockintql deterministic adjudicate "$ADDRESS" --json
 
-# Graph shell (compile, spec, seeds, explorer handoff) - explicitly required in this task
+# Graph shell (compile, spec, seeds, explorer handoff)
 run_json graph_shell blockintql graph shell "Build analyst graph with timeline, evidence drawer and local deterministic support" --seed "$ADDRESS" --json
 
 # Evidence export (reproducible audit artifact from local core)

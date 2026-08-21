@@ -1034,7 +1034,7 @@ export const useExplorerStore = create<ExplorerState>((set) => ({
       };
     }),
 
-  // One-click evidence export wired to deterministic layer (OSS value)
+  // Evidence export via deterministic layer
   exportEvidence: (subject?: string) => {
     const addr = subject || state.selectedNodeKey || (state.nodes[0]?.rawValue || "");
     if (!addr) return null;
@@ -1077,7 +1077,7 @@ export const useExplorerStore = create<ExplorerState>((set) => ({
     return bundle;
   },
 
-  // Next wave: saved workspaces as portable JSON (standalone OSS value for explorer-v2)
+  // Saved workspaces as portable JSON
   saveWorkspace: () => {
     const ws = {
       version: "explorer-v2-workspace-v1",
@@ -1122,7 +1122,7 @@ export const useExplorerStore = create<ExplorerState>((set) => ({
     return false;
   },
 
-  // Timeline + attribution support (next wave for explorer-v2 standalone)
+  // Timeline + attribution
   getTimeline: () => {
     const events = Object.values(state.nodeDetails).flatMap((d: any) => d.transactions || []);
     return events

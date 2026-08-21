@@ -87,11 +87,9 @@ Your impl must respect overrides while keeping the votes shape.
 - Bump `model` and spec doc on breaking changes.
 - Policy has its own `version` + hash for provenance.
 
-## Call to Action
+## Compatibility
 
-Fork this, implement in your language, run the tests, publish with "sonar_consensus_v1 compatible".
-
-Together we create an open, auditable standard that closed vendors will have to match for credibility in agentic compliance.
+If your output matches the contract, you can call it `sonar_consensus_v1` compatible. Fork this, implement it in your language, and run the tests.
 
 See also:
 - deterministic-library.md

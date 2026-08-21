@@ -3226,17 +3226,9 @@ def graph(ctx):
         return
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# NEW: First-class deterministic core (the heart of the open source foundation)
-# ──────────────────────────────────────────────────────────────────────────────
 @cli.group()
 def deterministic():
-    """
-    Direct access to the open-source deterministic core.
-
-    This is the auditable, versioned, agent-native reasoning layer.
-    Use it standalone or as the control plane on top of any data sources.
-    """
+    """Run the local deterministic screening core (no API key required for local data)."""
 
 
 @deterministic.command("adjudicate")

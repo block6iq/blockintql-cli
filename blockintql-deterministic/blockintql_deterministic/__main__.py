@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-Tiny CLI for the standalone blockintql-deterministic package.
-
-This makes the OSS deterministic core immediately useful even without the full blockintql CLI.
+CLI for the blockintql-deterministic package.
 
 Examples:
   blockintql-deterministic --version
@@ -25,7 +23,7 @@ from .policy import Policy, load_policy
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="blockintql-deterministic",
-        description="BlockINTQL deterministic screening core (standalone). sonar_consensus_v1 3-agent swarm for agentic compliance.",
+        description="BlockINTQL deterministic screening core. sonar_consensus_v1 swarm (Sentinel / Cypher / Nova).",
     )
     parser.add_argument("-V", "--version", action="store_true", help="Print version and exit")
 

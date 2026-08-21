@@ -1,4 +1,4 @@
-# Dev setup for rich Grok-style BlockINTQL chat
+# Dev setup for BlockINTQL chat
 
 ## Quick start for testing the rich terminal UI + local server bypass
 
@@ -41,7 +41,7 @@ Then just:
 The wrapper forces PYTHONPATH to this source + calls the venv entrypoint.
 
 ## Notes
-- The rich REPL (Grok-style box, grounded panels, citations, 0-cost) is in the dev source.
+- The rich REPL (grounded panels, citations, 0-cost) is in the dev source.
 - The local server has hardcoded bypass for the admin test key so you can test without any payments/credits/DB.
 - To "update" to latest dev: cd here; git pull (or checkout the branch); the wrapper or activate will pick it up. After editing the local server (blockintql/main.py) — including the /explorer-react graph mount — restart the uvicorn process.
 - When the admin bypass is active you will see a "[DEV SIM - local bypass, not production labels]" note. Sentinel will now correctly hit known OFAC addresses from the real list for test cases.
@@ -56,7 +56,7 @@ For a single shell session (e.g. before running smoke):
 export BLOCKINTQL_API_KEY=biq_sk_live_YOUR_REAL_OR_DEV_KEY
 ```
 
-For the recommended friction-free local dev + OSS core smoke (no credits, local deterministic always, graph shell just works):
+For local dev + smoke tests (no credits, local deterministic, graph shell):
 
 ```bash
 export BLOCKINTQL_API_URL=http://127.0.0.1:8000

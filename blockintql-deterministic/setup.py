@@ -8,7 +8,7 @@ setup(
     package_data={"blockintql_deterministic": ["py.typed"]},
     python_requires=">=3.10",
     install_requires=[],
-    description="Deterministic screening core and sonar_consensus_v1 swarm for agentic compliance (lightweight standalone).",
+    description="Deterministic screening core and sonar_consensus_v1 swarm.",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     author="Block6IQ",
