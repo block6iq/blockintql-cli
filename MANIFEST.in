@@ -1,2 +1,3 @@
 global-exclude *.docx
 global-exclude *.pdf
+recursive-include blockintql/data *

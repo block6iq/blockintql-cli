@@ -338,19 +338,40 @@ def get_provider_configured_settings(provider_name=None):
 
 def infer_chain_from_value(value, fallback="bitcoin"):
     text = str(value or "").strip()
-    if text.startswith("0x") and len(text) == 42:
+    extracted = _extract_address_from_text(text) or text
+    if extracted.startswith("0x") and len(extracted) == 42:
         return "ethereum"
-    if text.startswith(("bc1", "1", "3")):
+    if extracted.startswith(("bc1", "1", "3")):
         return "bitcoin"
-    if text.startswith("T") and len(text) == 34:
+    if extracted.startswith("T") and len(extracted) == 34:
         return "tron"
-    if text.startswith(("L", "M")):
+    if extracted.startswith(("L", "M")):
         return "litecoin"
     return fallback
 
 
 def coalesce_address(argument_value=None, option_value=None):
-    return option_value or argument_value
+    raw = option_value or argument_value
+    if not raw:
+        return raw
+    return _extract_address_from_text(str(raw)) or str(raw).strip()
+
+
+def _local_adjudicate(
+    address: str,
+    chain: str = "ethereum",
+    labels_path: str | None = None,
+):
+    """Local screening with bundled OFAC labels. No API key required."""
+    from .deterministic import adjudicate
+    from .labels import resolve_own_labels
+
+    own_labels = resolve_own_labels(address, labels_path=labels_path)
+    return adjudicate(
+        address,
+        chain=chain,
+        own_labels=own_labels or None,
+    )
 
 def get_headers():
     key = get_api_key()
@@ -2824,11 +2845,10 @@ def verdict(address_arg, address, chain, context, provider, provider_key, provid
         p_info = f" + {provider} (local)" if provider else ""
         console.print(f"[dim]Screening {address[:20]}...{p_info}[/]")
 
-    # STEP 1: Prefer the open-source deterministic core when we have no (or only local) provider
-    # This is the key to making the OSS repo a real foundation, not just a client.
     if not provider:
-        from .deterministic import adjudicate
-        result = adjudicate(address, chain=chain)
+        result = _local_adjudicate(address, chain=chain)
+        if result.get("verdict") == "BLOCK" and not quiet and not agent:
+            console.print("[dim]Label source: bundled OFAC/sanctions set[/dim]")
         output(result, agent, quiet)
         return
 
@@ -2880,10 +2900,10 @@ def screen(address_arg, address, chain, provider, provider_key, provider_url, ag
         p_info = f" + {provider} (local)" if provider else ""
         console.print(f"[dim]Screening {address[:20]}...{p_info}[/]")
 
-    # STEP 1: Prefer the open deterministic core for pure local / bring-your-own-data use cases
     if not provider:
-        from .deterministic import adjudicate
-        result = adjudicate(address, chain=chain)
+        result = _local_adjudicate(address, chain=chain)
+        if result.get("verdict") == "BLOCK" and not quiet and not agent:
+            console.print("[dim]Label source: bundled OFAC/sanctions set[/dim]")
         output(result, agent, quiet)
         return
 
@@ -3915,12 +3935,8 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
 
         if use_local and turn_address:
             try:
-                from .deterministic import adjudicate, export_evidence_bundle, Policy
-                local_res = adjudicate(turn_address, chain=chain)
-        if use_local and address:
-            try:
-                from .deterministic import adjudicate, export_evidence_bundle, Policy
-                local_res = adjudicate(address, chain=chain)
+                from .deterministic import export_evidence_bundle, Policy
+                local_res = _local_adjudicate(turn_address, chain=chain)
                 bundle = export_evidence_bundle(
                     subject=turn_address,
                     chain=chain,
@@ -3929,16 +3945,11 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
                     consensus=local_res.get("consensus", {}),
                     final_verdict=local_res,
                 )
-                # Full local deterministic path (rich grounded experience, no server required).
-                # This is the default when no BLOCKINTQL_API_KEY or when using DEV_NO_AUTH / localhost.
-                # Produces the same SONAR CONSENSUS panels the server path renders.
                 verdict = local_res.get("verdict")
                 risk = local_res.get("risk_score")
                 narrative = (
-                    f"[GROUNDED] Local deterministic screen of {turn_address} on {chain}. "
-                    f"Verdict {verdict} (risk {risk}/100) via 3-agent sonar_consensus_v1 "
-                    f"(Sentinel sanctions/labels, Cypher real FIFO lot accounting, Nova hops/velocity/patterns). "
-                    "Pure local core — zero central API roundtrip."
+                    f"[GROUNDED] Local screen of {turn_address} on {chain}. "
+                    f"Verdict {verdict} (risk {risk}/100)."
                 )
                 result = {
                     "narrative": narrative,
@@ -3946,36 +3957,24 @@ def _run_chat_repl(*, session_id=None, address=None, chain="ethereum", agent=Fal
                         "verdict": verdict,
                         "safe": local_res.get("safe"),
                         "risk_score": risk,
-                        "risk_indicators": local_res.get("risk_indicators", []) or (local_res.get("consensus") or {}).get("risk_indicators", []),
-                # Build full grounded response locally (narrative stub + deterministic)
-                narrative = f"[GROUNDED] Screened {address} on {chain}. Verdict {local_res.get('verdict')} (risk {local_res.get('risk_score')}/100) from 3-agent swarm. Using local deterministic core (no server roundtrip in this mode)."
-                result = {
-                    "narrative": narrative,
-                    "blockintql": {
-                        "verdict": local_res.get("verdict"),
-                        "safe": local_res.get("safe"),
-                        "risk_score": local_res.get("risk_score"),
                         "risk_indicators": local_res.get("risk_indicators", []),
                         "entity": local_res.get("entity"),
                     },
                     "consensus": local_res.get("consensus"),
                     "local_evidence_bundle": bundle.to_dict(),
                     "citations": [
-                        "Sentinel: sanctions + labels (local)",
-                        "Cypher: deterministic FIFO source-of-funds per spec §5.4 (local)",
-                        "Nova: structural patterns / hops / velocity (local)",
+                        "Sentinel: sanctions and label intelligence (local)",
+                        "Cypher: FIFO source-of-funds (local)",
+                        "Nova: patterns/hops (local)",
                     ],
-                    "citations": ["Sentinel: sanctions and label intelligence (local)", "Cypher: FIFO source-of-funds (local)", "Nova: patterns/hops (local)"],
                     "cost": {"credits_charged": 0, "model": "local-deterministic"},
                     "session_id": active_session_id or "local-only",
                 }
                 _render_grounded_chat_box(result)
-                # One-click evidence always available in local mode (the audit artifact users asked for)
-                console.print("  [dim]Evidence bundle ready: blockintql deterministic export-evidence " + turn_address + " --out evidence.json[/dim]")
-                console.print("  [dim]Or copy from result['local_evidence_bundle'] for programmatic use.[/dim]")
-                continue  # handled locally, no API call
+                console.print("  [dim]Evidence: blockintql deterministic export-evidence " + turn_address + " --out evidence.json[/dim]")
+                continue
             except Exception as e:
-                err_console.print(f"  [yellow]Local deterministic fallback failed ({e}), trying server...[/yellow]")
+                err_console.print(f"  [yellow]Local screening failed ({e}), trying server...[/yellow]")
 
         # Fallback to server path (existing)
         endpoint = "/v1/blockintql-ask" if grounded else "/v1/chat"

@@ -19,6 +19,10 @@ setup(
     author_email="joe@block6iq.com",
     url="https://blockintql.com",
     packages=find_packages(include=["blockintql", "blockintql.*"]),
+    package_data={
+        "blockintql": ["data/*"],
+    },
+    include_package_data=True,
     install_requires=[
         "click>=8.0.0",
         "httpx>=0.27.0",

@@ -420,52 +420,60 @@ class BlockINTQLCliTests(unittest.TestCase):
 
     @patch("blockintql.cli.api_post")
     def test_verdict_auto_detects_ethereum_from_hex_address(self, mock_api_post):
-        mock_api_post.return_value = {
-            "verdict": "CLEAR",
-            "safe": True,
-            "risk_score": 0,
-            "risk_indicators": [],
-            "entity": None,
-            "action": "ok",
-            "chain": "ethereum",
-        }
         result = self.runner.invoke(
             cli,
             ["verdict", "--address", "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", "--agent"],
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_api_post.assert_called_once_with(
-            "/v1/verdict",
-            {
-                "address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-                "chain": "ethereum",
-                "context": "",
-            },
-        )
+        payload = json.loads(result.output)
+        self.assertEqual(payload["chain"], "ethereum")
+        self.assertTrue(payload.get("deterministic"))
+        mock_api_post.assert_not_called()
 
     @patch("blockintql.cli.api_post")
     def test_screen_auto_detects_ethereum_from_hex_address(self, mock_api_post):
-        mock_api_post.return_value = {
-            "verdict": "CLEAR",
-            "safe": True,
-            "risk_score": 0,
-            "risk_indicators": [],
-            "entity": None,
-            "action": "ok",
-            "chain": "ethereum",
-        }
         result = self.runner.invoke(
             cli,
             ["screen", "--address", "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", "--agent"],
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_api_post.assert_called_once_with(
-            "/v1/screen",
-            {
-                "address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-                "chain": "ethereum",
-            },
+        payload = json.loads(result.output)
+        self.assertEqual(payload["chain"], "ethereum")
+        self.assertTrue(payload.get("deterministic"))
+        mock_api_post.assert_not_called()
+
+    @patch("blockintql.cli.api_post")
+    def test_verdict_blocks_bundled_ofac_address(self, mock_api_post):
+        result = self.runner.invoke(
+            cli,
+            [
+                "verdict",
+                "--address",
+                "0x7F19720A857F834887FC9A7bC0a0fBe7Fc7f8102",
+                "--agent",
+            ],
         )
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["verdict"], "BLOCK")
+        self.assertEqual(payload["risk_score"], 100.0)
+        self.assertFalse(payload["safe"])
+        self.assertEqual(payload["chain"], "ethereum")
+        self.assertEqual(payload.get("entity"), "OFAC SDN")
+        self.assertIn("SANCTIONS", " ".join(payload.get("risk_indicators") or []).upper())
+        mock_api_post.assert_not_called()
+
+    @patch("blockintql.cli.api_post")
+    def test_verdict_extracts_eth_address_from_noisy_prefix(self, mock_api_post):
+        result = self.runner.invoke(
+            cli,
+            ["verdict", "--address", "t0x7F19720A857F834887FC9A7bC0a0fBe7Fc7f8102", "--agent"],
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["verdict"], "BLOCK")
+        self.assertEqual(payload["chain"], "ethereum")
+        mock_api_post.assert_not_called()
 
     @patch("blockintql.cli.api_post")
     def test_generic_provider_does_not_require_key(self, mock_api_post):
@@ -539,27 +547,15 @@ class BlockINTQLCliTests(unittest.TestCase):
 
     @patch("blockintql.cli.api_post")
     def test_screen_accepts_positional_address(self, mock_api_post):
-        mock_api_post.return_value = {
-            "verdict": "CLEAR",
-            "safe": True,
-            "risk_score": 0,
-            "risk_indicators": [],
-            "entity": None,
-            "action": "ok",
-            "chain": "ethereum",
-        }
         result = self.runner.invoke(
             cli,
             ["screen", "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", "--agent"],
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_api_post.assert_called_once_with(
-            "/v1/screen",
-            {
-                "address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-                "chain": "ethereum",
-            },
-        )
+        payload = json.loads(result.output)
+        self.assertEqual(payload["chain"], "ethereum")
+        self.assertTrue(payload.get("deterministic"))
+        mock_api_post.assert_not_called()
 
     @patch("blockintql.cli.api_get")
     def test_history_accepts_positional_address(self, mock_api_get):

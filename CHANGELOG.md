@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added / In Progress
+- **1.5.5 local OFAC screening**: package ships `blockintql/data/ofac_sanctioned_crypto_addresses.txt`. `verdict` / `screen` with no provider use bundled labels, so known OFAC addresses (e.g. Tornado Cash `0x7F1972…`) return BLOCK / 100 without an API key. `0x` addresses auto-detect as Ethereum even if a stray prefix is pasted.
+
+### Added / In Progress
 - `blockintql-deterministic` packaging polish: real console script (`blockintql-deterministic adjudicate ...` + `eval`), `__main__.py`, fixed pyproject entry points, updated README with source install + CLI examples, version 0.1.1. Now `pip install -e ./blockintql-deterministic` + direct use is fully supported and verified.
 - Bare `blockintql` (no key, `DEV_NO_AUTH`, or localhost) runs the local deterministic core: BLOCKINTQL panel, narrative, SONAR CONSENSUS (Sentinel/Cypher/Nova votes, reasons, citations), and evidence bundle export.
 - Deeper explorer-v2 timeline UI: dedicated `Timeline` React component with focusable events, range scrubber, filter/sort, export buttons; wired into App + store `getTimeline()`.
