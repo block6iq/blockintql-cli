@@ -188,7 +188,14 @@ def adjudicate(
     # Merge own_labels into provider for local Sentinel etc.
     if own_labels and addr in own_labels:
         own = own_labels[addr]
-        provider = {**provider, **{k: v for k, v in own.items() if k in ("entity_category", "risk_score", "sanctions_hit", "risk_indicators")}}
+        provider = {
+            **provider,
+            **{
+                k: v
+                for k, v in own.items()
+                if k in ("entity_name", "entity_category", "risk_score", "sanctions_hit", "risk_indicators")
+            },
+        }
 
     # 1. Provider layer
     base = _apply_full_provider_policy(provider, p)

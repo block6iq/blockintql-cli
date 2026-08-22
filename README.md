@@ -10,8 +10,9 @@ Includes:
 - Bring-your-own labels and data
 - Local graph algorithms (taint, communities, flow, betweenness, pagerank; GraphML/Neo4j export)
 - A local chat REPL when no API key is set
+- Bundled public OFAC crypto addresses for local BLOCK/100 screening (no API key)
 
-Works against BlockINTQL hosted data, your own data, other vendors, or fully locally.
+Works against BlockINTQL hosted data, your own data, other vendors, or fully locally. Local `verdict` / `screen` do not require an API key.
 
 ## Disclaimer
 
@@ -97,25 +98,16 @@ After updating, you can verify with:
 blockintql --version
 ```
 
-## Quick start — The new foundation experience
+## Quick start — no API key
 
 ```bash
-# 1. Install
 pip install blockintql
 
-# 2. (Optional but recommended for serious work) Run with your own data only
-export BLOCKINTQL_DEV_NO_AUTH=1   # during local development
-
-# 3. Use the deterministic core directly (the real value)
-python -c "
-from blockintql.deterministic import adjudicate, export_evidence_bundle
-result = adjudicate('0x7F19720A857F834887FC9A7bC0a0fBe7Fc7f8102')
-print(result['verdict'], result['risk_score'])
-bundle = export_evidence_bundle(...)
-"
+# Known OFAC SDN (Tornado Cash). Should return BLOCK / 100.
+blockintql verdict --address 0x7F19720A857F834887FC9A7bC0a0fBe7Fc7f8102
 ```
 
-Typing the bare command launches the rich interactive investigation environment (chat + graph orchestration):
+`0x…` addresses are treated as Ethereum. No BlockINTQL API key is required for this path. Hosted history, credits, and scale still use `blockintql auth` or wallet pay.
 
 ## Quick start (new default experience)
 

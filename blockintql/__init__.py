@@ -3,7 +3,7 @@
     from blockintql.deterministic import adjudicate, run_sonar_consensus_v1, export_evidence_bundle, Policy
 """
 
-__version__ = "1.5.4"
+__version__ = "1.5.5"
 
 from .deterministic import adjudicate, run_sonar_consensus_v1, export_evidence_bundle, Policy  # noqa: F401
 
