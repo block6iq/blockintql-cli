@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from setuptools import find_packages, setup
@@ -5,8 +6,11 @@ from setuptools import find_packages, setup
 
 ROOT = Path(__file__).parent
 README = (ROOT / "README.md").read_text(encoding="utf-8")
-VERSION = {}
-exec((ROOT / "blockintql" / "__init__.py").read_text(encoding="utf-8"), VERSION)
+_INIT = (ROOT / "blockintql" / "__init__.py").read_text(encoding="utf-8")
+_match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', _INIT, re.M)
+if not _match:
+    raise RuntimeError("Could not find __version__ in blockintql/__init__.py")
+VERSION = {"__version__": _match.group(1)}
 
 
 setup(
